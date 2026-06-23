@@ -179,3 +179,44 @@ fn handle_key(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn test_full_streaming_pipeline() {
+        let mut app = app::App::new();
+
+        // Simulate user typing and sending a message
+        app.input_char('H');
+        app.input_char('i');
+        let user_msg = app.send_message();
+        assert!(user_msg.is_some(), "send_message should succeed with non-empty input");
+        assert!(app.streaming, "app should be streaming after send");
+
+        // Simulate the API → channel → drain flow (mini event loop)
+        let (tx, rx) = mpsc::channel::<String>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+
+        tx.send("Hello".to_string()).unwrap();
+        tx.send(" world".to_string()).unwrap();
+        tx.send("!".to_string()).unwrap();
+        done_tx.send(()).unwrap();
+
+        // Drain tokens (mirrors run() logic)
+        while let Ok(token) = rx.try_recv() {
+            app.append_agent_token(&token);
+        }
+        if done_rx.try_recv().is_ok() {
+            app.finish_streaming();
+        }
+
+        // Assert final state
+        assert!(!app.streaming, "streaming should be finished");
+        let agent_msg = app.messages.last().unwrap();
+        assert_eq!(agent_msg.role, app::MessageRole::Agent);
+        assert_eq!(agent_msg.content, "Hello world!");
+    }
+}

@@ -15,7 +15,7 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageRole {
     User,
     Agent,
@@ -158,5 +158,55 @@ impl App {
 
     pub fn move_cursor_end(&mut self) {
         self.cursor_pos = self.input.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_append_first_token_creates_agent_message() {
+        let mut app = App::new();
+        assert_eq!(app.messages.len(), 1); // welcome system message
+
+        app.append_agent_token("Hello");
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[1].role, MessageRole::Agent);
+        assert_eq!(app.messages[1].content, "Hello");
+    }
+
+    #[test]
+    fn test_append_token_appends_to_existing_agent() {
+        let mut app = App::new();
+        app.append_agent_token("Hello");
+        app.append_agent_token(" world");
+
+        assert_eq!(app.messages.len(), 2); // welcome + 1 agent
+        assert_eq!(app.messages[1].content, "Hello world");
+    }
+
+    #[test]
+    fn test_append_token_after_system_message_creates_new_agent() {
+        let mut app = App::new();
+        app.append_agent_token("Hi");
+        app.add_system_message("Error: something");
+        app.append_agent_token("Hello again");
+
+        // welcome, agent("Hi"), system, agent("Hello again")
+        assert_eq!(app.messages.len(), 4);
+        assert_eq!(app.messages[1].role, MessageRole::Agent);
+        assert_eq!(app.messages[1].content, "Hi");
+        assert_eq!(app.messages[2].role, MessageRole::System);
+        assert_eq!(app.messages[3].role, MessageRole::Agent);
+        assert_eq!(app.messages[3].content, "Hello again");
+    }
+
+    #[test]
+    fn test_finish_streaming_sets_flag() {
+        let mut app = App::new();
+        app.streaming = true;
+        app.finish_streaming();
+        assert!(!app.streaming);
     }
 }

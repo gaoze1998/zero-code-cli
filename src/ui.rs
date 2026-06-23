@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, MessageRole};
+use crate::app::{App, Message, MessageRole};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -103,6 +103,130 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(Text::from(vec![line])).block(block);
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal;
+
+    /// Collect all cell symbols from the buffer into a single String,
+    /// then check if the target text appears anywhere.
+    fn buffer_contains(buffer: &Buffer, text: &str) -> bool {
+        let area = buffer.area();
+        // Build per-row strings and join with newlines to preserve layout
+        let mut content = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                content.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            content.push('\n');
+        }
+        content.contains(text)
+    }
+
+    #[test]
+    fn test_streaming_cursor_renders() {
+        let mut app = App::new();
+        app.streaming = true;
+        app.messages.push(Message {
+            role: MessageRole::Agent,
+            content: "Thinking...".into(),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "▌"),
+            "streaming cursor ▌ should be present"
+        );
+    }
+
+    #[test]
+    fn test_no_streaming_cursor_when_idle() {
+        let mut app = App::new();
+        app.streaming = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            !buffer_contains(buffer, "▌"),
+            "no streaming cursor should appear when idle"
+        );
+    }
+
+    #[test]
+    fn test_await_in_status_bar() {
+        let mut app = App::new();
+        app.streaming = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "AWAIT"),
+            "status bar should show AWAIT during streaming"
+        );
+    }
+
+    #[test]
+    fn test_insert_in_status_bar() {
+        let mut app = App::new();
+        app.streaming = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "INSERT"),
+            "status bar should show INSERT when idle"
+        );
+    }
+
+    #[test]
+    fn test_input_waiting_title() {
+        let mut app = App::new();
+        app.streaming = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "waiting..."),
+            "input panel should show 'waiting...' during streaming"
+        );
+    }
+
+    #[test]
+    fn test_input_normal_title() {
+        let mut app = App::new();
+        app.streaming = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // " Input " (with spaces) is the normal title
+        assert!(
+            buffer_contains(buffer, " Input "),
+            "input panel should show normal ' Input ' title when idle"
+        );
+    }
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
