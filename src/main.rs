@@ -49,19 +49,22 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Drive the tokio runtime so spawned async tasks make progress
-        let _ = rt.block_on(async {});
+        rt.block_on(async {});
 
         // Drain streaming tokens
         while let Ok(token) = rx.try_recv() {
+            eprintln!("[DEBUG] Token received: {:?}", token);
             app.append_agent_token(&token);
         }
         // Drain error messages
         while let Ok(err) = err_rx.try_recv() {
+            eprintln!("[DEBUG] Error received: {}", err);
             app.add_system_message(&format!("Error: {}", err));
             app.finish_streaming();
         }
         // Check for stream completion
         if done_rx.try_recv().is_ok() {
+            eprintln!("[DEBUG] Stream done signal received");
             app.finish_streaming();
         }
 

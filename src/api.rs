@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use crate::config::Config;
 
@@ -31,6 +32,7 @@ struct StreamChoice {
 #[derive(Deserialize)]
 struct DeltaContent {
     content: Option<String>,
+    reasoning_content: Option<String>,
 }
 
 /// Build the list of messages to send to the API.
@@ -65,10 +67,16 @@ pub async fn stream_chat(
     conversation: &[crate::app::Message],
     tx: Sender<String>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let url = format!("{}/v1/chat/completions", config.api_url.trim_end_matches('/'));
 
     let messages = build_messages(config, conversation);
+    eprintln!("[DEBUG] Sending request to {} with model {}", url, config.model);
+    eprintln!("[DEBUG] {} messages in conversation", messages.len());
+
     let request = ChatRequest {
         model: config.model.clone(),
         messages,
@@ -86,14 +94,18 @@ pub async fn stream_chat(
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    eprintln!("[DEBUG] Response status: {}", status);
+
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        eprintln!("[DEBUG] Error body: {}", body);
         return Err(format!("API error ({}): {}", status, body));
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut token_count: u32 = 0;
 
     loop {
         use futures_util::StreamExt;
@@ -114,22 +126,104 @@ pub async fn stream_chat(
             }
 
             if line == "data: [DONE]" {
+                eprintln!("[DEBUG] Stream complete, {} tokens received", token_count);
                 return Ok(());
             }
 
             if let Some(data) = line.strip_prefix("data: ") {
                 match serde_json::from_str::<StreamChunk>(data) {
                     Ok(chunk) => {
-                        if let Some(choice) = chunk.choices.first()
-                            && let Some(ref content) = choice.delta.content
-                            && tx.send(content.clone()).is_err()
-                        {
-                            return Ok(());
+                        if let Some(choice) = chunk.choices.first() {
+                            let token = choice.delta.content.as_ref().or(
+                                choice.delta.reasoning_content.as_ref(),
+                            );
+                            if let Some(ref token) = token
+                                && !token.is_empty()
+                            {
+                                token_count += 1;
+                                if token_count <= 3 {
+                                    eprintln!("[DEBUG] Token {}: {:?}", token_count, token);
+                                }
+                                if tx.send(token.to_string()).is_err() {
+                                    eprintln!("[DEBUG] Receiver dropped, stopping stream");
+                                    return Ok(());
+                                }
+                            }
                         }
                     }
-                    Err(_) => continue, // skip unparseable lines
+                    Err(_) => continue,
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn test_delta_parses_reasoning_content() {
+        let json = r#"{"choices":[{"delta":{"content":null,"reasoning_content":"hello"}}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        let delta = &chunk.choices[0].delta;
+        assert!(delta.content.is_none());
+        assert_eq!(delta.reasoning_content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_delta_parses_content() {
+        let json = r#"{"choices":[{"delta":{"content":"world","reasoning_content":null}}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        let delta = &chunk.choices[0].delta;
+        assert_eq!(delta.content.as_deref(), Some("world"));
+        assert!(delta.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn test_delta_parses_both_null() {
+        let json = r#"{"choices":[{"delta":{"content":null,"reasoning_content":null}}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        let delta = &chunk.choices[0].delta;
+        assert!(delta.content.is_none());
+        assert!(delta.reasoning_content.is_none());
+    }
+
+    #[test]
+    #[ignore] // Requires DEEPSEEK_API_KEY env var
+    fn test_live_api_streaming() {
+        let config = Config::load();
+        if config.api_key.is_empty() {
+            eprintln!("Skipping: DEEPSEEK_API_KEY not set");
+            return;
+        }
+
+        let conversation = vec![
+            crate::app::Message {
+                role: crate::app::MessageRole::User,
+                content: "say hi".into(),
+            },
+        ];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel::<String>();
+
+        rt.block_on(async {
+            match stream_chat(&config, &conversation, tx).await {
+                Ok(()) => eprintln!("OK: stream completed"),
+                Err(e) => panic!("API call failed: {}", e),
+            }
+        });
+
+        let mut all_tokens = String::new();
+        while let Ok(token) = rx.try_recv() {
+            all_tokens.push_str(&token);
+        }
+        assert!(!all_tokens.is_empty(), "Expected non-empty response, got nothing");
     }
 }
