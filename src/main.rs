@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod config;
+mod logger;
 mod ui;
 
 use std::io::{self, stdout};
@@ -18,6 +19,13 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> io::Result<()> {
+    let log_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".zero-code-cli")
+        .join("debug.log");
+    // Ignore errors — logging is best-effort for debugging
+    let _ = logger::init(&log_path);
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -53,18 +61,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
 
         // Drain streaming tokens
         while let Ok(token) = rx.try_recv() {
-            eprintln!("[DEBUG] Token received: {:?}", token);
+            debug!("Token received: {:?}", token);
             app.append_agent_token(&token);
         }
         // Drain error messages
         while let Ok(err) = err_rx.try_recv() {
-            eprintln!("[DEBUG] Error received: {}", err);
+            debug!("Error received: {}", err);
             app.add_system_message(&format!("Error: {}", err));
             app.finish_streaming();
         }
         // Check for stream completion
         if done_rx.try_recv().is_ok() {
-            eprintln!("[DEBUG] Stream done signal received");
+            debug!("Stream done signal received");
             app.finish_streaming();
         }
 

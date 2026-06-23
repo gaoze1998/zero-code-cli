@@ -74,8 +74,8 @@ pub async fn stream_chat(
     let url = format!("{}/v1/chat/completions", config.api_url.trim_end_matches('/'));
 
     let messages = build_messages(config, conversation);
-    eprintln!("[DEBUG] Sending request to {} with model {}", url, config.model);
-    eprintln!("[DEBUG] {} messages in conversation", messages.len());
+    crate::debug!("Sending request to {} with model {}", url, config.model);
+    crate::debug!("{} messages in conversation", messages.len());
 
     let request = ChatRequest {
         model: config.model.clone(),
@@ -95,11 +95,11 @@ pub async fn stream_chat(
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     let status = response.status();
-    eprintln!("[DEBUG] Response status: {}", status);
+    crate::debug!("Response status: {}", status);
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        eprintln!("[DEBUG] Error body: {}", body);
+        crate::debug!("Error body: {}", body);
         return Err(format!("API error ({}): {}", status, body));
     }
 
@@ -126,7 +126,7 @@ pub async fn stream_chat(
             }
 
             if line == "data: [DONE]" {
-                eprintln!("[DEBUG] Stream complete, {} tokens received", token_count);
+                crate::debug!("Stream complete, {} tokens received", token_count);
                 return Ok(());
             }
 
@@ -142,10 +142,10 @@ pub async fn stream_chat(
                             {
                                 token_count += 1;
                                 if token_count <= 3 {
-                                    eprintln!("[DEBUG] Token {}: {:?}", token_count, token);
+                                    crate::debug!("Token {}: {:?}", token_count, token);
                                 }
                                 if tx.send(token.to_string()).is_err() {
-                                    eprintln!("[DEBUG] Receiver dropped, stopping stream");
+                                    crate::debug!("Receiver dropped, stopping stream");
                                     return Ok(());
                                 }
                             }
