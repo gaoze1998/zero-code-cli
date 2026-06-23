@@ -49,7 +49,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Drive the tokio runtime so spawned async tasks make progress
-        rt.block_on(async {});
+        rt.block_on(tokio::task::yield_now());
 
         // Drain streaming tokens
         while let Ok(token) = rx.try_recv() {
