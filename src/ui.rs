@@ -26,25 +26,76 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
-    let mut messages: Vec<Line> = app
-        .messages
-        .iter()
-        .map(|msg| {
-            let (role_label, color) = match msg.role {
-                MessageRole::User => ("You", Color::Green),
-                MessageRole::Agent => ("Agent", Color::Cyan),
-                MessageRole::System => ("System", Color::Yellow),
-            };
-            vec![
-                Span::styled(
-                    format!("{}: ", role_label),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(&msg.content),
-            ]
-            .into()
-        })
-        .collect();
+    let mut messages: Vec<Line> = Vec::new();
+
+    for msg in &app.messages {
+        match msg.role {
+            MessageRole::Tool => {
+                if msg.tool_calls.is_some() {
+                    // Tool call message
+                    if let Some(ref tcs) = msg.tool_calls
+                        && let Some(tc) = tcs.first()
+                    {
+                        messages.push(Line::from(vec![
+                            Span::styled(
+                                format!("{}(", tc.name),
+                                Style::default()
+                                    .fg(Color::Magenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                &tc.arguments,
+                                Style::default().fg(Color::Magenta),
+                            ),
+                            Span::styled(
+                                ")",
+                                Style::default()
+                                    .fg(Color::Magenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                    }
+                } else {
+                    // Tool result message
+                    let style = if msg.tool_result_error {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    // Truncate long results in display
+                    let display = if msg.content.len() > 500 {
+                        format!("{}... (truncated)", &msg.content[..500])
+                    } else {
+                        msg.content.clone()
+                    };
+                    messages.push(Line::from(Span::styled(
+                        format!("  {}", display),
+                        style,
+                    )));
+                }
+            }
+            _ => {
+                let (role_label, color) = match msg.role {
+                    MessageRole::User => ("You", Color::Green),
+                    MessageRole::Agent => ("Agent", Color::Cyan),
+                    MessageRole::System => ("System", Color::Yellow),
+                    MessageRole::Tool => unreachable!(),
+                };
+                messages.push(
+                    vec![
+                        Span::styled(
+                            format!("{}: ", role_label),
+                            Style::default()
+                                .fg(color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(&msg.content),
+                    ]
+                    .into(),
+                );
+            }
+        }
+    }
 
     // Show streaming indicator on last agent message
     if app.streaming
@@ -53,7 +104,9 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
     {
         messages.push(Line::from(Span::styled(
             "▌",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::RAPID_BLINK),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::RAPID_BLINK),
         )));
     }
 
@@ -67,15 +120,20 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let block = if app.streaming {
+    let block = if app.agent_active {
         Block::default()
             .borders(Borders::ALL)
-            .title(" Input (waiting...) ")
+            .title(" Input (agent...) ")
     } else {
         Block::default().borders(Borders::ALL).title(" Input ")
     };
 
-    let prompt = Span::styled("> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+    let prompt = Span::styled(
+        "> ",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let line = if app.input.is_empty() {
         let cursor = Span::styled(" ", Style::default().bg(Color::White));
@@ -100,10 +158,69 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             );
             after_str = String::new();
         }
-        Line::from(vec![prompt, Span::raw(before), highlight, Span::raw(after_str)])
+        Line::from(vec![
+            prompt,
+            Span::raw(before),
+            highlight,
+            Span::raw(after_str),
+        ])
     };
 
     let paragraph = Paragraph::new(Text::from(vec![line])).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
+    let mode_text = if app.agent_active {
+        Span::styled(
+            " AGENT ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        let mode = app.input_mode();
+        Span::styled(
+            format!(" {} ", mode),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let status = Line::from(vec![
+        mode_text,
+        Span::raw(" │ "),
+        Span::styled(
+            "Enter",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" send │ "),
+        Span::styled(
+            "Ctrl+C",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" quit │ "),
+        Span::styled(
+            "Ctrl+W",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" delete word │ "),
+        Span::styled(
+            "↑↓",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" scroll"),
+    ]);
+
+    let paragraph = Paragraph::new(status)
+        .style(Style::default().fg(Color::DarkGray))
+        .block(Block::default().style(Style::default().bg(Color::Rgb(
+            30, 30, 30,
+        ))));
+
     f.render_widget(paragraph, area);
 }
 
@@ -114,11 +231,8 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    /// Collect all cell symbols from the buffer into a single String,
-    /// then check if the target text appears anywhere.
     fn buffer_contains(buffer: &Buffer, text: &str) -> bool {
         let area = buffer.area();
-        // Build per-row strings and join with newlines to preserve layout
         let mut content = String::new();
         for y in 0..area.height {
             for x in 0..area.width {
@@ -136,6 +250,9 @@ mod tests {
         app.messages.push(Message {
             role: MessageRole::Agent,
             content: "Thinking...".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_result_error: false,
         });
 
         let backend = TestBackend::new(80, 24);
@@ -166,9 +283,9 @@ mod tests {
     }
 
     #[test]
-    fn test_await_in_status_bar() {
+    fn test_agent_in_status_bar() {
         let mut app = App::new();
-        app.streaming = true;
+        app.agent_active = true;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -176,14 +293,15 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert!(
-            buffer_contains(buffer, "AWAIT"),
-            "status bar should show AWAIT during streaming"
+            buffer_contains(buffer, "AGENT"),
+            "status bar should show AGENT during agent activity"
         );
     }
 
     #[test]
     fn test_insert_in_status_bar() {
         let mut app = App::new();
+        app.agent_active = false;
         app.streaming = false;
 
         let backend = TestBackend::new(80, 24);
@@ -198,9 +316,9 @@ mod tests {
     }
 
     #[test]
-    fn test_input_waiting_title() {
+    fn test_input_agent_title() {
         let mut app = App::new();
-        app.streaming = true;
+        app.agent_active = true;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -208,65 +326,72 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert!(
-            buffer_contains(buffer, "waiting..."),
-            "input panel should show 'waiting...' during streaming"
+            buffer_contains(buffer, "agent..."),
+            "input panel should show 'agent...' during agent activity"
         );
     }
 
     #[test]
     fn test_input_normal_title() {
         let mut app = App::new();
-        app.streaming = false;
+        app.agent_active = false;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
-        // " Input " (with spaces) is the normal title
         assert!(
             buffer_contains(buffer, " Input "),
             "input panel should show normal ' Input ' title when idle"
         );
     }
-}
 
-fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let mode_text = if app.streaming {
-        Span::styled(
-            " AWAIT ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        let mode = app.input_mode();
-        Span::styled(
-            format!(" {} ", mode),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
+    #[test]
+    fn test_tool_call_renders() {
+        let mut app = App::new();
+        app.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "ls({\"path\":\"src\"})".into(),
+            tool_calls: Some(vec![crate::app::ToolCall {
+                id: "call_1".into(),
+                name: "ls".into(),
+                arguments: "{\"path\":\"src\"}".into(),
+            }]),
+            tool_call_id: None,
+            tool_result_error: false,
+        });
 
-    let status = Line::from(vec![
-        mode_text,
-        Span::raw(" │ "),
-        Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" send │ "),
-        Span::styled("Ctrl+C", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" quit │ "),
-        Span::styled("Ctrl+W", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" delete word │ "),
-        Span::styled("↑↓", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" scroll"),
-    ]);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
 
-    let paragraph = Paragraph::new(status)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().style(Style::default().bg(Color::Rgb(30, 30, 30))));
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "ls("),
+            "tool call should show function name"
+        );
+    }
 
-    f.render_widget(paragraph, area);
+    #[test]
+    fn test_tool_result_renders() {
+        let mut app = App::new();
+        app.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "main.rs\napi.rs".into(),
+            tool_calls: None,
+            tool_call_id: Some("call_1".into()),
+            tool_result_error: false,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "main.rs"),
+            "tool result should show content"
+        );
+    }
 }

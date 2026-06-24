@@ -4,13 +4,14 @@ mod api;
 mod app;
 mod config;
 mod logger;
+mod tools;
 mod ui;
 
 use std::io::{self, stdout};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use app::App;
+use app::{AgentEvent, App};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -23,7 +24,6 @@ fn main() -> io::Result<()> {
         .unwrap_or_default()
         .join(".zero-code-cli")
         .join("debug.log");
-    // Ignore errors — logging is best-effort for debugging
     let _ = logger::init(&log_path);
 
     enable_raw_mode()?;
@@ -49,9 +49,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         .expect("failed to create tokio runtime");
     let mut app = App::new();
 
-    let (tx, rx) = mpsc::channel::<String>();
-    let (err_tx, err_rx) = mpsc::channel::<String>();
-    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
 
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
@@ -59,28 +57,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         // Drive the tokio runtime so spawned async tasks make progress
         rt.block_on(tokio::task::yield_now());
 
-        // Drain streaming tokens
-        while let Ok(token) = rx.try_recv() {
-            debug!("Token received: {:?}", token);
-            app.append_agent_token(&token);
-        }
-        // Drain error messages
-        while let Ok(err) = err_rx.try_recv() {
-            debug!("Error received: {}", err);
-            app.add_system_message(&format!("Error: {}", err));
-            app.finish_streaming();
-        }
-        // Check for stream completion
-        if done_rx.try_recv().is_ok() {
-            debug!("Stream done signal received");
-            app.finish_streaming();
+        // Drain agent events
+        while let Ok(event) = event_rx.try_recv() {
+            app.handle_agent_event(event);
         }
 
         // Poll for input
         if event::poll(Duration::from_millis(16)).unwrap_or(false) {
             match event::read()? {
                 Event::Key(key) => {
-                    handle_key(&mut app, key, &rt, &tx, &err_tx, &done_tx);
+                    handle_key(&mut app, key, &rt, &event_tx);
                 }
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -100,9 +86,7 @@ fn handle_key(
     app: &mut App,
     key: KeyEvent,
     rt: &tokio::runtime::Runtime,
-    tx: &mpsc::Sender<String>,
-    err_tx: &mpsc::Sender<String>,
-    done_tx: &mpsc::Sender<()>,
+    event_tx: &mpsc::Sender<AgentEvent>,
 ) {
     // Ctrl+C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -128,30 +112,24 @@ fn handle_key(
                     .map(|m| app::Message {
                         role: m.role,
                         content: m.content.clone(),
+                        tool_calls: m.tool_calls.clone(),
+                        tool_call_id: m.tool_call_id.clone(),
+                        tool_result_error: m.tool_result_error,
                     })
                     .collect();
-                let tx = tx.clone();
-                let err_tx = err_tx.clone();
-                let done_tx = done_tx.clone();
+                let tx = event_tx.clone();
                 rt.spawn(async move {
-                    match api::stream_chat(&config, &conversation, tx).await {
-                        Ok(()) => {
-                            let _ = done_tx.send(());
-                        }
-                        Err(e) => {
-                            let _ = err_tx.send(e);
-                        }
-                    }
+                    agent_loop(&config, &conversation, tx).await;
                 });
             }
         }
         KeyCode::Backspace => {
-            if !app.streaming {
+            if !app.agent_active {
                 app.delete_char();
             }
         }
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if !app.streaming {
+            if !app.agent_active {
                 app.delete_word();
             }
         }
@@ -180,12 +158,113 @@ fn handle_key(
             app.scroll_down_page(5);
         }
         KeyCode::Char(c) => {
-            if !app.streaming {
+            if !app.agent_active {
                 app.input_char(c);
             }
         }
         _ => {}
     }
+}
+
+async fn agent_loop(
+    config: &config::Config,
+    initial_messages: &[app::Message],
+    event_tx: mpsc::Sender<AgentEvent>,
+) {
+    const MAX_ITERATIONS: usize = 10;
+
+    // Build the conversation history as ApiMessage format
+    // Start with initial messages (will be wrapped with system prompt in build_messages)
+    let mut messages: Vec<app::Message> = initial_messages.to_vec();
+
+    let tool_defs = tools::get_tool_definitions();
+
+    for iteration in 0..MAX_ITERATIONS {
+        debug!(
+            "Agent loop iteration {}/{}, {} messages in history",
+            iteration + 1,
+            MAX_ITERATIONS,
+            messages.len()
+        );
+
+        let completed = match api::stream_chat(
+            config,
+            &messages,
+            Some(tool_defs.clone()),
+            event_tx.clone(),
+        )
+        .await
+        {
+            Ok(tool_calls) => tool_calls,
+            Err(e) => {
+                let _ = event_tx.send(AgentEvent::Error(e));
+                return;
+            }
+        };
+
+        if completed.is_empty() {
+            debug!("No tool calls, agent loop complete after {} iterations", iteration + 1);
+            let _ = event_tx.send(AgentEvent::Done);
+            return;
+        }
+
+        debug!("Got {} tool calls to execute", completed.len());
+
+        // Add assistant message with tool calls to conversation history
+        let assistant_content = String::new(); // content was already streamed as tokens
+        messages.push(app::Message {
+            role: app::MessageRole::Agent,
+            content: assistant_content,
+            tool_calls: Some(
+                completed
+                    .iter()
+                    .map(|tc| app::ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
+                    .collect(),
+            ),
+            tool_call_id: None,
+            tool_result_error: false,
+        });
+
+        // Execute each tool call
+        for tc in &completed {
+            debug!("Executing tool: {} with args: {}", tc.name, tc.arguments);
+            let (result, is_error) = tools::execute_tool(&tc.name, &tc.arguments);
+            debug!(
+                "Tool {} result (error={}): {}",
+                tc.name,
+                is_error,
+                &result[..result.len().min(200)]
+            );
+
+            let _ = event_tx.send(AgentEvent::ToolCallEnd {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                arguments: tc.arguments.clone(),
+                result: result.clone(),
+                is_error,
+            });
+
+            // Add tool result to conversation history
+            messages.push(app::Message {
+                role: app::MessageRole::Tool,
+                content: result,
+                tool_calls: None,
+                tool_call_id: Some(tc.id.clone()),
+                tool_result_error: is_error,
+            });
+        }
+    }
+
+    // Max iterations reached
+    debug!("Agent loop reached max iterations ({})", MAX_ITERATIONS);
+    let _ = event_tx.send(AgentEvent::Error(format!(
+        "Agent reached max iterations ({}) without completing the task.",
+        MAX_ITERATIONS
+    )));
 }
 
 #[cfg(test)]
@@ -194,37 +273,100 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
-    fn test_full_streaming_pipeline() {
-        let mut app = app::App::new();
+    fn test_agent_loop_simple_text_response() {
+        // This test verifies the agent loop completes when no tools are needed.
+        // Since we can't easily mock the API, we test the channel flow.
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
 
-        // Simulate user typing and sending a message
+        // Send Done manually to verify the App handles it
+        event_tx.send(AgentEvent::Done).unwrap();
+
+        let mut app = App::new();
+        app.agent_active = true;
+        app.streaming = true;
+
+        while let Ok(event) = event_rx.try_recv() {
+            app.handle_agent_event(event);
+        }
+
+        assert!(!app.agent_active);
+        assert!(!app.streaming);
+    }
+
+    #[test]
+    fn test_full_streaming_pipeline() {
+        let mut app = App::new();
+
         app.input_char('H');
         app.input_char('i');
         let user_msg = app.send_message();
         assert!(user_msg.is_some(), "send_message should succeed with non-empty input");
+        assert!(app.agent_active, "agent should be active after send");
         assert!(app.streaming, "app should be streaming after send");
 
-        // Simulate the API → channel → drain flow (mini event loop)
-        let (tx, rx) = mpsc::channel::<String>();
-        let (done_tx, done_rx) = mpsc::channel::<()>();
+        // Simulate the agent event flow
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
 
-        tx.send("Hello".to_string()).unwrap();
-        tx.send(" world".to_string()).unwrap();
-        tx.send("!".to_string()).unwrap();
-        done_tx.send(()).unwrap();
+        event_tx.send(AgentEvent::Token("Hello".to_string())).unwrap();
+        event_tx.send(AgentEvent::Token(" world".to_string())).unwrap();
+        event_tx.send(AgentEvent::Token("!".to_string())).unwrap();
+        event_tx.send(AgentEvent::Done).unwrap();
 
-        // Drain tokens (mirrors run() logic)
-        while let Ok(token) = rx.try_recv() {
-            app.append_agent_token(&token);
-        }
-        if done_rx.try_recv().is_ok() {
-            app.finish_streaming();
+        while let Ok(event) = event_rx.try_recv() {
+            app.handle_agent_event(event);
         }
 
-        // Assert final state
+        assert!(!app.agent_active, "agent should be done");
         assert!(!app.streaming, "streaming should be finished");
         let agent_msg = app.messages.last().unwrap();
         assert_eq!(agent_msg.role, app::MessageRole::Agent);
         assert_eq!(agent_msg.content, "Hello world!");
+    }
+
+    #[test]
+    fn test_agent_loop_with_tool_calls() {
+        let mut app = App::new();
+        app.input_char('x'); // Need non-empty input for send_message to succeed
+        app.send_message();
+
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+
+        // Simulate a token, then a tool call, then more tokens, then done
+        event_tx.send(AgentEvent::Token("Let me".into())).unwrap();
+        event_tx.send(AgentEvent::Token(" check".into())).unwrap();
+        event_tx.send(AgentEvent::ToolCallStart {
+            id: "call_1".into(),
+            name: "ls".into(),
+        }).unwrap();
+        event_tx.send(AgentEvent::ToolCallArg {
+            id: "call_1".into(),
+            args: r#"{"path":"src"}"#.into(),
+        }).unwrap();
+        event_tx.send(AgentEvent::ToolCallEnd {
+            id: "call_1".into(),
+            name: "ls".into(),
+            arguments: r#"{"path":"src"}"#.into(),
+            result: "main.rs\napp.rs".into(),
+            is_error: false,
+        }).unwrap();
+        event_tx.send(AgentEvent::Token("Found 2".into())).unwrap();
+        event_tx.send(AgentEvent::Token(" files".into())).unwrap();
+        event_tx.send(AgentEvent::Done).unwrap();
+
+        while let Ok(event) = event_rx.try_recv() {
+            app.handle_agent_event(event);
+        }
+
+        assert!(!app.agent_active);
+        // Message sequence: welcome, user, agent("Let me check"), tool_call, tool_result, agent("Found 2 files")
+        assert_eq!(app.messages.len(), 6);
+        assert_eq!(app.messages[2].role, app::MessageRole::Agent);
+        assert!(app.messages[2].content.contains("Let me check"));
+        assert_eq!(app.messages[3].role, app::MessageRole::Tool);
+        assert!(app.messages[3].tool_calls.is_some());
+        assert_eq!(app.messages[4].role, app::MessageRole::Tool);
+        assert_eq!(app.messages[4].content, "main.rs\napp.rs");
+        assert_eq!(app.messages[5].role, app::MessageRole::Agent);
+        assert_eq!(app.messages[5].content, "Found 2 files");
     }
 }
