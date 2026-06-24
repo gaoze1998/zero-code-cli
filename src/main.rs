@@ -11,7 +11,7 @@ use std::io::{self, stdout};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use app::{AgentEvent, App};
+use app::{AgentEvent, App, Mode};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -103,14 +103,25 @@ fn handle_key(
     }
 
     match key.code {
+        KeyCode::Tab => {
+            if !app.agent_active {
+                let next = match app.current_mode {
+                    Mode::Plan => Mode::Build,
+                    Mode::Build => Mode::Plan,
+                };
+                app.switch_mode(next);
+            }
+        }
         KeyCode::Enter => {
             let input = app.input.trim().to_string();
             if input.starts_with('/') && app.handle_slash_command(&input) {
                 // slash command handled
             } else if let Some(_msg) = app.send_message() {
                 let config = app.config.clone();
+                let mode = app.current_mode;
+                let plan_artifact = app.plan_artifact.clone();
                 let conversation: Vec<app::Message> = app
-                    .messages
+                    .active_messages()
                     .iter()
                     .map(|m| app::Message {
                         role: m.role,
@@ -122,7 +133,7 @@ fn handle_key(
                     .collect();
                 let tx = event_tx.clone();
                 rt.spawn(async move {
-                    agent_loop(&config, &conversation, tx).await;
+                    agent_loop(&config, &conversation, mode, plan_artifact, tx).await;
                 });
             }
         }
@@ -172,22 +183,23 @@ fn handle_key(
 async fn agent_loop(
     config: &config::Config,
     initial_messages: &[app::Message],
+    mode: Mode,
+    _plan_artifact: Option<String>,
     event_tx: mpsc::Sender<AgentEvent>,
 ) {
     const MAX_ITERATIONS: usize = 10;
 
-    // Build the conversation history as ApiMessage format
-    // Start with initial messages (will be wrapped with system prompt in build_messages)
     let mut messages: Vec<app::Message> = initial_messages.to_vec();
 
     let tool_defs = tools::get_tool_definitions();
 
     for iteration in 0..MAX_ITERATIONS {
         debug!(
-            "Agent loop iteration {}/{}, {} messages in history",
+            "Agent loop iteration {}/{}, {} messages in history, mode={:?}",
             iteration + 1,
             MAX_ITERATIONS,
-            messages.len()
+            messages.len(),
+            mode
         );
 
         let completed = match api::stream_chat(
@@ -321,7 +333,7 @@ mod tests {
 
         assert!(!app.agent_active, "agent should be done");
         assert!(!app.streaming, "streaming should be finished");
-        let agent_msg = app.messages.last().unwrap();
+        let agent_msg = app.active_messages().last().unwrap();
         assert_eq!(agent_msg.role, app::MessageRole::Agent);
         assert_eq!(agent_msg.content, "Hello world!");
     }
@@ -361,15 +373,16 @@ mod tests {
         }
 
         assert!(!app.agent_active);
-        // Message sequence: welcome, user, agent("Let me check"), tool_call, tool_result, agent("Found 2 files")
-        assert_eq!(app.messages.len(), 6);
-        assert_eq!(app.messages[2].role, app::MessageRole::Agent);
-        assert!(app.messages[2].content.contains("Let me check"));
-        assert_eq!(app.messages[3].role, app::MessageRole::Agent);
-        assert!(app.messages[3].tool_calls.is_some());
-        assert_eq!(app.messages[4].role, app::MessageRole::Tool);
-        assert_eq!(app.messages[4].content, "main.rs\napp.rs");
-        assert_eq!(app.messages[5].role, app::MessageRole::Agent);
-        assert_eq!(app.messages[5].content, "Found 2 files");
+        let msgs = app.active_messages();
+        // welcome + prompt + user + agent("Let me check") + tool_call + tool_result + agent("Found 2 files")
+        assert_eq!(msgs.len(), 7);
+        assert_eq!(msgs[3].role, app::MessageRole::Agent);
+        assert!(msgs[3].content.contains("Let me check"));
+        assert_eq!(msgs[4].role, app::MessageRole::Agent);
+        assert!(msgs[4].tool_calls.is_some());
+        assert_eq!(msgs[5].role, app::MessageRole::Tool);
+        assert_eq!(msgs[5].content, "main.rs\napp.rs");
+        assert_eq!(msgs[6].role, app::MessageRole::Agent);
+        assert_eq!(msgs[6].content, "Found 2 files");
     }
 }

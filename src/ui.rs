@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, MessageRole};
+use crate::app::{App, MessageRole, Mode};
 #[cfg(test)]
 use crate::app::Message;
 
@@ -14,25 +14,50 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(1),  // tab bar
+            Constraint::Min(3),     // conversation
+            Constraint::Length(3),  // input
+            Constraint::Length(1),  // status bar
         ])
         .split(f.area());
 
-    draw_conversation(f, chunks[0], app);
-    draw_input(f, chunks[1], app);
-    draw_status_bar(f, chunks[2], app);
+    draw_tab_bar(f, chunks[0], app);
+    draw_conversation(f, chunks[1], app);
+    draw_input(f, chunks[2], app);
+    draw_status_bar(f, chunks[3], app);
+}
+
+fn draw_tab_bar(f: &mut Frame, area: Rect, app: &App) {
+    let plan_style = if app.current_mode == Mode::Plan {
+        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let build_style = if app.current_mode == Mode::Build {
+        Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let tabs = Line::from(vec![
+        Span::styled(" Plan ", plan_style),
+        Span::raw(" "),
+        Span::styled(" Build ", build_style),
+    ]);
+
+    let paragraph = Paragraph::new(Text::from(vec![tabs]))
+        .block(Block::default());
+    f.render_widget(paragraph, area);
 }
 
 fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
     let mut messages: Vec<Line> = Vec::new();
 
-    for msg in &app.messages {
+    for msg in app.active_messages().iter().skip(2) {
+        // Skip the initial welcome + mode prompt for cleaner display
         match msg.role {
             MessageRole::Tool => {
                 if msg.tool_calls.is_some() {
-                    // Tool call message
                     if let Some(ref tcs) = msg.tool_calls
                         && let Some(tc) = tcs.first()
                     {
@@ -56,13 +81,11 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
                         ]));
                     }
                 } else {
-                    // Tool result message
                     let style = if msg.tool_result_error {
                         Style::default().fg(Color::Red)
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    // Truncate long results in display
                     let display = if msg.content.len() > 500 {
                         format!("{}... (truncated)", &msg.content[..500])
                     } else {
@@ -99,7 +122,7 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
 
     // Show streaming indicator on last agent message
     if app.streaming
-        && let Some(last) = app.messages.last()
+        && let Some(last) = app.active_messages().last()
         && last.role == MessageRole::Agent
     {
         messages.push(Line::from(Span::styled(
@@ -120,12 +143,18 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
+    let mode_label = match app.current_mode {
+        Mode::Plan => "Plan",
+        Mode::Build => "Build",
+    };
     let block = if app.agent_active {
         Block::default()
             .borders(Borders::ALL)
-            .title(" Input (agent...) ")
+            .title(format!(" Input [{}] (agent...) ", mode_label))
     } else {
-        Block::default().borders(Borders::ALL).title(" Input ")
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Input [{}] ", mode_label))
     };
 
     let prompt = Span::styled(
@@ -171,7 +200,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let mode_text = if app.agent_active {
+    let mode_label = app.input_mode();
+    let mode_text = if mode_label == "AGENT" {
         Span::styled(
             " AGENT ",
             Style::default()
@@ -180,12 +210,15 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        let mode = app.input_mode();
+        let color = match app.current_mode {
+            Mode::Plan => Color::Cyan,
+            Mode::Build => Color::Green,
+        };
         Span::styled(
-            format!(" {} ", mode),
+            format!(" {} ", mode_label),
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Green)
+                .bg(color)
                 .add_modifier(Modifier::BOLD),
         )
     };
@@ -193,6 +226,8 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let status = Line::from(vec![
         mode_text,
         Span::raw(" │ "),
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" switch │ "),
         Span::styled(
             "Enter",
             Style::default().add_modifier(Modifier::BOLD),
@@ -252,7 +287,7 @@ mod tests {
     fn test_streaming_cursor_renders() {
         let mut app = App::new();
         app.streaming = true;
-        app.messages.push(Message {
+        app.active_messages_mut().push(Message {
             role: MessageRole::Agent,
             content: "Thinking...".into(),
             tool_calls: None,
@@ -304,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_in_status_bar() {
+    fn test_plan_in_status_bar() {
         let mut app = App::new();
         app.agent_active = false;
         app.streaming = false;
@@ -315,8 +350,26 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert!(
-            buffer_contains(buffer, "INSERT"),
-            "status bar should show INSERT when idle"
+            buffer_contains(buffer, "PLAN"),
+            "status bar should show PLAN when idle in plan mode"
+        );
+    }
+
+    #[test]
+    fn test_build_in_status_bar() {
+        let mut app = App::new();
+        app.switch_mode(Mode::Build);
+        app.agent_active = false;
+        app.streaming = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "BUILD"),
+            "status bar should show BUILD when idle in build mode"
         );
     }
 
@@ -337,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_input_normal_title() {
+    fn test_input_normal_title_shows_mode() {
         let mut app = App::new();
         app.agent_active = false;
 
@@ -347,15 +400,34 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert!(
-            buffer_contains(buffer, " Input "),
-            "input panel should show normal ' Input ' title when idle"
+            buffer_contains(buffer, "Input [Plan]"),
+            "input panel should show mode in title when idle"
+        );
+    }
+
+    #[test]
+    fn test_tab_bar_plan_active() {
+        let app = App::new();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buffer, "Plan"),
+            "tab bar should show Plan"
+        );
+        assert!(
+            buffer_contains(buffer, "Build"),
+            "tab bar should show Build"
         );
     }
 
     #[test]
     fn test_tool_call_renders() {
         let mut app = App::new();
-        app.messages.push(Message {
+        app.active_messages_mut().push(Message {
             role: MessageRole::Tool,
             content: "ls({\"path\":\"src\"})".into(),
             tool_calls: Some(vec![crate::app::ToolCall {
@@ -381,7 +453,7 @@ mod tests {
     #[test]
     fn test_tool_result_renders() {
         let mut app = App::new();
-        app.messages.push(Message {
+        app.active_messages_mut().push(Message {
             role: MessageRole::Tool,
             content: "main.rs\napi.rs".into(),
             tool_calls: None,

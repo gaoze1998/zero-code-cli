@@ -1,7 +1,16 @@
 use crate::config::Config;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Mode {
+    Plan,
+    Build,
+}
+
 pub struct App {
-    pub messages: Vec<Message>,
+    pub current_mode: Mode,
+    pub plan_messages: Vec<Message>,
+    pub build_messages: Vec<Message>,
+    pub plan_artifact: Option<String>,
     pub input: String,
     pub cursor_pos: usize,
     pub scroll_offset: u16,
@@ -50,16 +59,56 @@ pub enum AgentEvent {
     Error(String),
 }
 
+const PLAN_SYSTEM_PROMPT: &str = "\
+You are a software architect and technical design expert. Your role is to research, analyze, \
+and create detailed software design documents.
+
+When given a task:
+1. First, explore and understand the problem domain thoroughly — use tools to examine the \
+codebase, research approaches, and identify constraints.
+2. Analyze requirements, trade-offs, and potential approaches.
+3. Produce a comprehensive software design document covering architecture, components, \
+data flow, interfaces, key decisions, and risks.
+
+IMPORTANT: Do NOT write implementation code. Focus exclusively on design and planning. \
+Your output will be used by a separate build agent to implement the actual code.";
+
+const BUILD_SYSTEM_PROMPT: &str = "\
+You are a coding assistant. Write production-quality, safe, and efficient code. \
+Follow best practices and produce working implementations.";
+
 impl App {
     pub fn new() -> Self {
+        let welcome = Message {
+            role: MessageRole::System,
+            content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_result_error: false,
+        };
         Self {
-            messages: vec![Message {
-                role: MessageRole::System,
-                content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
-                tool_calls: None,
-                tool_call_id: None,
-                tool_result_error: false,
-            }],
+            current_mode: Mode::Plan,
+            plan_messages: vec![
+                welcome.clone(),
+                Message {
+                    role: MessageRole::System,
+                    content: PLAN_SYSTEM_PROMPT.into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    tool_result_error: false,
+                },
+            ],
+            build_messages: vec![
+                welcome,
+                Message {
+                    role: MessageRole::System,
+                    content: BUILD_SYSTEM_PROMPT.into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    tool_result_error: false,
+                },
+            ],
+            plan_artifact: None,
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
@@ -71,12 +120,74 @@ impl App {
         }
     }
 
+    pub fn active_messages(&self) -> &Vec<Message> {
+        match self.current_mode {
+            Mode::Plan => &self.plan_messages,
+            Mode::Build => &self.build_messages,
+        }
+    }
+
+    pub fn active_messages_mut(&mut self) -> &mut Vec<Message> {
+        match self.current_mode {
+            Mode::Plan => &mut self.plan_messages,
+            Mode::Build => &mut self.build_messages,
+        }
+    }
+
+    pub fn switch_mode(&mut self, mode: Mode) {
+        if self.current_mode == mode {
+            return;
+        }
+        // Capture plan artifact when switching from plan to build
+        if self.current_mode == Mode::Plan && mode == Mode::Build {
+            self.capture_plan_artifact();
+        }
+        self.current_mode = mode;
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.scroll_offset = 0;
+        self.pending_tool_calls.clear();
+    }
+
+    fn capture_plan_artifact(&mut self) {
+        let agent_texts: Vec<&str> = self
+            .plan_messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Agent && !m.content.is_empty())
+            .map(|m| m.content.as_str())
+            .collect();
+        if agent_texts.is_empty() {
+            return;
+        }
+        self.plan_artifact = Some(agent_texts.join("\n\n"));
+    }
+
     pub fn send_message(&mut self) -> Option<String> {
         let msg = self.input.trim().to_string();
         if msg.is_empty() || self.streaming || self.agent_active {
             return None;
         }
-        self.messages.push(Message {
+
+        // If build mode and plan_artifact exists, inject it before the user message
+        if self.current_mode == Mode::Build
+            && let Some(ref artifact) = self.plan_artifact
+            && !self.build_messages.iter().any(|m| m.content.contains(artifact.as_str()))
+        {
+            self.build_messages.push(Message {
+                role: MessageRole::System,
+                content: format!(
+                    "You have been given a software design plan. Follow it closely when implementing.\n\
+                     If you find issues with the plan, note them but still follow the overall architecture.\n\
+                     \nHere is the design plan:\n---\n{}\n---",
+                    artifact
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_result_error: false,
+            });
+        }
+
+        self.active_messages_mut().push(Message {
             role: MessageRole::User,
             content: msg.clone(),
             tool_calls: None,
@@ -96,18 +207,47 @@ impl App {
                 self.reset_session();
                 true
             }
+            "/plan" => {
+                self.switch_mode(Mode::Plan);
+                true
+            }
+            "/build" => {
+                self.switch_mode(Mode::Build);
+                true
+            }
             _ => false,
         }
     }
 
     fn reset_session(&mut self) {
-        self.messages = vec![Message {
+        let welcome = Message {
             role: MessageRole::System,
             content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
             tool_calls: None,
             tool_call_id: None,
             tool_result_error: false,
-        }];
+        };
+        self.plan_messages = vec![
+            welcome.clone(),
+            Message {
+                role: MessageRole::System,
+                content: PLAN_SYSTEM_PROMPT.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_result_error: false,
+            },
+        ];
+        self.build_messages = vec![
+            welcome,
+            Message {
+                role: MessageRole::System,
+                content: BUILD_SYSTEM_PROMPT.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_result_error: false,
+            },
+        ];
+        self.plan_artifact = None;
         self.input.clear();
         self.cursor_pos = 0;
         self.scroll_offset = 0;
@@ -118,13 +258,14 @@ impl App {
 
     pub fn append_agent_token(&mut self, token: &str) {
         self.streaming = true;
-        if let Some(last) = self.messages.last_mut()
+        let messages = self.active_messages_mut();
+        if let Some(last) = messages.last_mut()
             && last.role == MessageRole::Agent
         {
             last.content.push_str(token);
             return;
         }
-        self.messages.push(Message {
+        messages.push(Message {
             role: MessageRole::Agent,
             content: token.to_string(),
             tool_calls: None,
@@ -134,7 +275,7 @@ impl App {
     }
 
     pub fn add_system_message(&mut self, text: &str) {
-        self.messages.push(Message {
+        self.active_messages_mut().push(Message {
             role: MessageRole::System,
             content: text.to_string(),
             tool_calls: None,
@@ -161,16 +302,15 @@ impl App {
             }
             AgentEvent::ToolCallEnd { id, name, arguments, result, is_error } => {
                 self.pending_tool_calls.retain(|tc| tc.id != id);
-                // Add assistant tool-call message
-                self.messages.push(Message {
+                let messages = self.active_messages_mut();
+                messages.push(Message {
                     role: MessageRole::Agent,
                     content: format!("{}({})", name, arguments),
                     tool_calls: Some(vec![ToolCall { id: id.clone(), name, arguments }]),
                     tool_call_id: None,
                     tool_result_error: false,
                 });
-                // Add tool-result message
-                self.messages.push(Message {
+                messages.push(Message {
                     role: MessageRole::Tool,
                     content: result,
                     tool_calls: None,
@@ -265,16 +405,19 @@ impl App {
         self.cursor_pos = 0;
     }
 
+    pub fn move_cursor_end(&mut self) {
+        self.cursor_pos = self.input.len();
+    }
+
     pub fn input_mode(&self) -> &str {
         if self.agent_active {
             "AGENT"
         } else {
-            "INSERT"
+            match self.current_mode {
+                Mode::Plan => "PLAN",
+                Mode::Build => "BUILD",
+            }
         }
-    }
-
-    pub fn move_cursor_end(&mut self) {
-        self.cursor_pos = self.input.len();
     }
 }
 
@@ -283,14 +426,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_initial_state() {
+        let app = App::new();
+        assert_eq!(app.current_mode, Mode::Plan);
+        // Each mode has welcome + mode system prompt = 2 messages
+        assert_eq!(app.plan_messages.len(), 2);
+        assert_eq!(app.build_messages.len(), 2);
+        assert_eq!(app.plan_messages[0].content, "Welcome to Zero Code CLI. Type /help for available commands.");
+        assert_eq!(app.plan_messages[1].content, PLAN_SYSTEM_PROMPT);
+        assert_eq!(app.build_messages[1].content, BUILD_SYSTEM_PROMPT);
+        assert!(app.plan_artifact.is_none());
+        assert!(!app.agent_active);
+        assert!(!app.streaming);
+        assert_eq!(app.input_mode(), "PLAN");
+    }
+
+    #[test]
+    fn test_active_messages_respects_mode() {
+        let mut app = App::new();
+        // Plan mode by default — push a user message
+        app.input = "plan msg".into();
+        app.send_message();
+        assert_eq!(app.plan_messages.len(), 3); // welcome + prompt + user
+        assert_eq!(app.build_messages.len(), 2); // unchanged
+    }
+
+    #[test]
     fn test_append_first_token_creates_agent_message() {
         let mut app = App::new();
-        assert_eq!(app.messages.len(), 1); // welcome system message
-
+        let initial_len = app.active_messages().len();
         app.append_agent_token("Hello");
-        assert_eq!(app.messages.len(), 2);
-        assert_eq!(app.messages[1].role, MessageRole::Agent);
-        assert_eq!(app.messages[1].content, "Hello");
+        assert_eq!(app.active_messages().len(), initial_len + 1);
+        let last = app.active_messages().last().unwrap();
+        assert_eq!(last.role, MessageRole::Agent);
+        assert_eq!(last.content, "Hello");
     }
 
     #[test]
@@ -298,9 +467,8 @@ mod tests {
         let mut app = App::new();
         app.append_agent_token("Hello");
         app.append_agent_token(" world");
-
-        assert_eq!(app.messages.len(), 2); // welcome + 1 agent
-        assert_eq!(app.messages[1].content, "Hello world");
+        let last = app.active_messages().last().unwrap();
+        assert_eq!(last.content, "Hello world");
     }
 
     #[test]
@@ -309,24 +477,25 @@ mod tests {
         app.append_agent_token("Hi");
         app.add_system_message("Error: something");
         app.append_agent_token("Hello again");
-
-        assert_eq!(app.messages.len(), 4);
-        assert_eq!(app.messages[1].role, MessageRole::Agent);
-        assert_eq!(app.messages[1].content, "Hi");
-        assert_eq!(app.messages[2].role, MessageRole::System);
-        assert_eq!(app.messages[3].role, MessageRole::Agent);
-        assert_eq!(app.messages[3].content, "Hello again");
+        let msgs = app.active_messages();
+        let len = msgs.len();
+        assert_eq!(msgs[len - 3].role, MessageRole::Agent);
+        assert_eq!(msgs[len - 3].content, "Hi");
+        assert_eq!(msgs[len - 2].role, MessageRole::System);
+        assert_eq!(msgs[len - 1].role, MessageRole::Agent);
+        assert_eq!(msgs[len - 1].content, "Hello again");
     }
 
     #[test]
     fn test_agent_event_token() {
         let mut app = App::new();
+        let initial_len = app.active_messages().len();
         app.handle_agent_event(AgentEvent::Token("Hi".into()));
         app.handle_agent_event(AgentEvent::Token(" there".into()));
-
-        assert_eq!(app.messages.len(), 2);
-        assert_eq!(app.messages[1].role, MessageRole::Agent);
-        assert_eq!(app.messages[1].content, "Hi there");
+        assert_eq!(app.active_messages().len(), initial_len + 1);
+        let last = app.active_messages().last().unwrap();
+        assert_eq!(last.role, MessageRole::Agent);
+        assert_eq!(last.content, "Hi there");
         assert!(app.streaming);
     }
 
@@ -336,7 +505,6 @@ mod tests {
         app.agent_active = true;
         app.streaming = true;
         app.handle_agent_event(AgentEvent::Done);
-
         assert!(!app.agent_active);
         assert!(!app.streaming);
     }
@@ -347,10 +515,9 @@ mod tests {
         app.agent_active = true;
         app.streaming = true;
         app.handle_agent_event(AgentEvent::Error("boom".into()));
-
         assert!(!app.agent_active);
         assert!(!app.streaming);
-        let last = app.messages.last().unwrap();
+        let last = app.active_messages().last().unwrap();
         assert_eq!(last.role, MessageRole::System);
         assert!(last.content.contains("boom"));
     }
@@ -358,25 +525,12 @@ mod tests {
     #[test]
     fn test_agent_event_tool_call_flow() {
         let mut app = App::new();
+        let initial_len = app.active_messages().len();
 
-        // Agent begins text response
         app.handle_agent_event(AgentEvent::Token("Let me check".into()));
-
-        // Model decides to call a tool
-        app.handle_agent_event(AgentEvent::ToolCallStart {
-            id: "call_1".into(),
-            name: "ls".into(),
-        });
-        app.handle_agent_event(AgentEvent::ToolCallArg {
-            id: "call_1".into(),
-            args: r#"{"path":"#.into(),
-        });
-        app.handle_agent_event(AgentEvent::ToolCallArg {
-            id: "call_1".into(),
-            args: r#""src"}"#.into(),
-        });
-
-        // Tool execution completes
+        app.handle_agent_event(AgentEvent::ToolCallStart { id: "call_1".into(), name: "ls".into() });
+        app.handle_agent_event(AgentEvent::ToolCallArg { id: "call_1".into(), args: r#"{"path":"#.into() });
+        app.handle_agent_event(AgentEvent::ToolCallArg { id: "call_1".into(), args: r#""src"}"#.into() });
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "call_1".into(),
             name: "ls".into(),
@@ -384,23 +538,21 @@ mod tests {
             result: "main.rs\napp.rs".into(),
             is_error: false,
         });
-
-        // Agent continues after tool result
         app.handle_agent_event(AgentEvent::Token("Found 2 files".into()));
         app.handle_agent_event(AgentEvent::Done);
 
-        // Verify message sequence: welcome, agent("Let me check"), tool_call, tool_result, agent("Found 2 files")
-        assert_eq!(app.messages.len(), 5);
-        assert_eq!(app.messages[0].role, MessageRole::System); // welcome
-        assert_eq!(app.messages[1].role, MessageRole::Agent);
-        assert_eq!(app.messages[1].content, "Let me check");
-        assert_eq!(app.messages[2].role, MessageRole::Agent);
-        assert!(app.messages[2].tool_calls.is_some());
-        assert_eq!(app.messages[3].role, MessageRole::Tool);
-        assert_eq!(app.messages[3].tool_call_id, Some("call_1".into()));
-        assert_eq!(app.messages[3].content, "main.rs\napp.rs");
-        assert_eq!(app.messages[4].role, MessageRole::Agent);
-        assert_eq!(app.messages[4].content, "Found 2 files");
+        let msgs = app.active_messages();
+        // initial (2 welcome/prompt) + agent("Let me check") + tool_call + tool_result + agent("Found 2 files")
+        assert_eq!(msgs.len(), initial_len + 4);
+        assert_eq!(msgs[initial_len].role, MessageRole::Agent);
+        assert_eq!(msgs[initial_len].content, "Let me check");
+        assert_eq!(msgs[initial_len + 1].role, MessageRole::Agent);
+        assert!(msgs[initial_len + 1].tool_calls.is_some());
+        assert_eq!(msgs[initial_len + 2].role, MessageRole::Tool);
+        assert_eq!(msgs[initial_len + 2].tool_call_id, Some("call_1".into()));
+        assert_eq!(msgs[initial_len + 2].content, "main.rs\napp.rs");
+        assert_eq!(msgs[initial_len + 3].role, MessageRole::Agent);
+        assert_eq!(msgs[initial_len + 3].content, "Found 2 files");
         assert!(!app.agent_active);
         assert!(!app.streaming);
     }
@@ -410,9 +562,9 @@ mod tests {
         let mut app = App::new();
         app.agent_active = true;
         app.input = "test".into();
-
         assert!(app.send_message().is_none());
-        assert_eq!(app.messages.len(), 1); // only welcome message
+        // Only welcome + mode prompt
+        assert_eq!(app.active_messages().len(), 2);
     }
 
     #[test]
@@ -420,36 +572,42 @@ mod tests {
         let mut app = App::new();
         app.streaming = true;
         app.input = "test".into();
-
         assert!(app.send_message().is_none());
     }
 
     #[test]
     fn test_input_mode_agent() {
         let mut app = App::new();
-        assert_eq!(app.input_mode(), "INSERT");
         app.agent_active = true;
         assert_eq!(app.input_mode(), "AGENT");
     }
 
     #[test]
-    fn test_slash_command_new_resets_session() {
+    fn test_input_mode_plan() {
+        let app = App::new();
+        assert_eq!(app.input_mode(), "PLAN");
+    }
+
+    #[test]
+    fn test_input_mode_build() {
         let mut app = App::new();
-        // Add some conversation
-        app.messages.push(Message {
-            role: MessageRole::User,
-            content: "hello".into(),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_result_error: false,
+        app.switch_mode(Mode::Build);
+        assert_eq!(app.input_mode(), "BUILD");
+    }
+
+    #[test]
+    fn test_slash_command_new_resets_both_modes() {
+        let mut app = App::new();
+        // Add messages to both modes
+        app.plan_messages.push(Message {
+            role: MessageRole::User, content: "p".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
         });
-        app.messages.push(Message {
-            role: MessageRole::Agent,
-            content: "hi there".into(),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_result_error: false,
+        app.build_messages.push(Message {
+            role: MessageRole::User, content: "b".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
         });
+        app.plan_artifact = Some("plan".into());
         app.input = "some text".into();
         app.cursor_pos = 5;
         app.scroll_offset = 10;
@@ -459,9 +617,11 @@ mod tests {
         let handled = app.handle_slash_command("/new");
         assert!(handled);
 
-        // Should be back to initial state
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].role, MessageRole::System);
+        // Both modes reset to welcome + mode prompt
+        assert_eq!(app.plan_messages.len(), 2);
+        assert_eq!(app.plan_messages[0].role, MessageRole::System);
+        assert_eq!(app.build_messages.len(), 2);
+        assert!(app.plan_artifact.is_none());
         assert!(app.input.is_empty());
         assert_eq!(app.cursor_pos, 0);
         assert_eq!(app.scroll_offset, 0);
@@ -474,7 +634,121 @@ mod tests {
         let mut app = App::new();
         let handled = app.handle_slash_command("/foo");
         assert!(!handled);
-        // App state unchanged (welcome message still present)
-        assert_eq!(app.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_switch_mode_plan_to_build_captures_artifact() {
+        let mut app = App::new();
+        // Add agent messages to plan mode
+        app.plan_messages.push(Message {
+            role: MessageRole::Agent,
+            content: "Design: use async Rust".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
+        });
+        app.plan_messages.push(Message {
+            role: MessageRole::Agent,
+            content: "Architecture: event-driven".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
+        });
+
+        app.switch_mode(Mode::Build);
+        assert_eq!(app.current_mode, Mode::Build);
+        assert!(app.plan_artifact.is_some());
+        let artifact = app.plan_artifact.unwrap();
+        assert!(artifact.contains("Design: use async Rust"));
+        assert!(artifact.contains("Architecture: event-driven"));
+        assert!(app.input.is_empty());
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_switch_mode_build_to_plan_no_capture() {
+        let mut app = App::new();
+        app.switch_mode(Mode::Build);
+        app.plan_artifact = None;
+
+        app.switch_mode(Mode::Plan);
+        assert_eq!(app.current_mode, Mode::Plan);
+        assert!(app.plan_artifact.is_none());
+    }
+
+    #[test]
+    fn test_switch_mode_same_mode_noop() {
+        let mut app = App::new();
+        app.input = "hello".into();
+        app.cursor_pos = 3;
+        app.switch_mode(Mode::Plan); // same as default
+        assert_eq!(app.current_mode, Mode::Plan);
+        assert_eq!(app.input, "hello"); // unchanged — no reset
+    }
+
+    #[test]
+    fn test_slash_plan() {
+        let mut app = App::new();
+        app.switch_mode(Mode::Build);
+        assert!(app.handle_slash_command("/plan"));
+        assert_eq!(app.current_mode, Mode::Plan);
+    }
+
+    #[test]
+    fn test_slash_build() {
+        let mut app = App::new();
+        assert!(app.handle_slash_command("/build"));
+        assert_eq!(app.current_mode, Mode::Build);
+    }
+
+    #[test]
+    fn test_plan_artifact_injected_on_build_send() {
+        let mut app = App::new();
+        // Set up: switch to build mode with a plan artifact
+        app.plan_messages.push(Message {
+            role: MessageRole::Agent,
+            content: "Use hexagonal architecture".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
+        });
+        app.switch_mode(Mode::Build);
+
+        // Send a message in build mode
+        app.input = "implement it".into();
+        app.send_message();
+
+        // Check that the artifact was injected as a system message
+        let build_msgs = &app.build_messages;
+        // welcome + build prompt + plan artifact system msg + user "implement it"
+        assert_eq!(build_msgs.len(), 4);
+        assert_eq!(build_msgs[2].role, MessageRole::System);
+        assert!(build_msgs[2].content.contains("Use hexagonal architecture"));
+        assert!(build_msgs[2].content.contains("Here is the design plan"));
+        assert_eq!(build_msgs[3].role, MessageRole::User);
+        assert_eq!(build_msgs[3].content, "implement it");
+    }
+
+    #[test]
+    fn test_plan_artifact_not_injected_twice() {
+        let mut app = App::new();
+        app.plan_messages.push(Message {
+            role: MessageRole::Agent,
+            content: "Use hexagonal architecture".into(),
+            tool_calls: None, tool_call_id: None, tool_result_error: false,
+        });
+        app.switch_mode(Mode::Build);
+
+        // First message injects the artifact
+        app.input = "first msg".into();
+        app.send_message();
+        // Manually reset for second message
+        app.agent_active = false;
+        app.streaming = false;
+        app.input = "second msg".into();
+        app.send_message();
+
+        let build_msgs = &app.build_messages;
+        // welcome + build prompt + artifact system + user "first" + user "second"
+        // Only one artifact injection
+        let artifact_count = build_msgs
+            .iter()
+            .filter(|m| m.content.contains("Here is the design plan"))
+            .count();
+        assert_eq!(artifact_count, 1);
     }
 }
