@@ -135,9 +135,9 @@ impl App {
             }
             AgentEvent::ToolCallEnd { id, name, arguments, result, is_error } => {
                 self.pending_tool_calls.retain(|tc| tc.id != id);
-                // Add tool-call message
+                // Add assistant tool-call message
                 self.messages.push(Message {
-                    role: MessageRole::Tool,
+                    role: MessageRole::Agent,
                     content: format!("{}({})", name, arguments),
                     tool_calls: Some(vec![ToolCall { id: id.clone(), name, arguments }]),
                     tool_call_id: None,
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(app.messages[0].role, MessageRole::System); // welcome
         assert_eq!(app.messages[1].role, MessageRole::Agent);
         assert_eq!(app.messages[1].content, "Let me check");
-        assert_eq!(app.messages[2].role, MessageRole::Tool);
+        assert_eq!(app.messages[2].role, MessageRole::Agent);
         assert!(app.messages[2].tool_calls.is_some());
         assert_eq!(app.messages[3].role, MessageRole::Tool);
         assert_eq!(app.messages[3].tool_call_id, Some("call_1".into()));

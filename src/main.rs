@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(app.messages.len(), 6);
         assert_eq!(app.messages[2].role, app::MessageRole::Agent);
         assert!(app.messages[2].content.contains("Let me check"));
-        assert_eq!(app.messages[3].role, app::MessageRole::Tool);
+        assert_eq!(app.messages[3].role, app::MessageRole::Agent);
         assert!(app.messages[3].tool_calls.is_some());
         assert_eq!(app.messages[4].role, app::MessageRole::Tool);
         assert_eq!(app.messages[4].content, "main.rs\napp.rs");
