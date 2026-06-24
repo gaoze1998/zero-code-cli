@@ -7,6 +7,9 @@ static LOG_WRITER: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
 
 /// Initialize the debug log file. Truncates on each run.
 pub fn init(log_path: &Path) -> io::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let file = File::create(log_path)?;
     let mut writer = LOG_WRITER.lock().unwrap();
     *writer = Some(BufWriter::new(file));

@@ -6,7 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Message, MessageRole};
+use crate::app::{App, MessageRole};
+#[cfg(test)]
+use crate::app::Message;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
