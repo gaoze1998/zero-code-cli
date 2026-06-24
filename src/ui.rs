@@ -53,6 +53,26 @@ fn draw_tab_bar(f: &mut Frame, area: Rect, app: &App) {
 fn draw_conversation(f: &mut Frame, area: Rect, app: &App) {
     let mut messages: Vec<Line> = Vec::new();
 
+    // In Build mode, show plan's agent output as context above the build conversation
+    if app.current_mode == Mode::Build {
+        for msg in app.plan_messages.iter().skip(2) {
+            if msg.role == MessageRole::Agent && !msg.content.is_empty() {
+                messages.push(Line::from(Span::styled(
+                    format!("[Plan] {}", msg.content),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        if !messages.is_empty() {
+            messages.push(Line::from(Span::styled(
+                "─── Build ───",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
     for msg in app.active_messages().iter().skip(2) {
         // Skip the initial welcome + mode prompt for cleaner display
         match msg.role {
