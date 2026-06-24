@@ -1,12 +1,19 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+static ENABLED: AtomicBool = AtomicBool::new(false);
 static LOG_WRITER: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
 
-/// Initialize the debug log file. Truncates on each run.
+/// Initialize the debug log file. Only active when DEBUG=true.
+/// Truncates on each run.
 pub fn init(log_path: &Path) -> io::Result<()> {
+    if std::env::var("DEBUG").as_deref() != Ok("true") {
+        return Ok(());
+    }
+    ENABLED.store(true, Ordering::Relaxed);
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -18,6 +25,9 @@ pub fn init(log_path: &Path) -> io::Result<()> {
 
 /// Write a debug entry to the log file. Flushes immediately.
 pub fn write_debug(file: &str, line: u32, msg: &str) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if let Ok(mut guard) = LOG_WRITER.lock()
         && let Some(ref mut w) = *guard
     {
