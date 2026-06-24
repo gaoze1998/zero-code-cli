@@ -104,7 +104,10 @@ fn handle_key(
 
     match key.code {
         KeyCode::Enter => {
-            if let Some(_msg) = app.send_message() {
+            let input = app.input.trim().to_string();
+            if input.starts_with('/') && app.handle_slash_command(&input) {
+                // slash command handled
+            } else if let Some(_msg) = app.send_message() {
                 let config = app.config.clone();
                 let conversation: Vec<app::Message> = app
                     .messages

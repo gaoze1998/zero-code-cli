@@ -90,6 +90,32 @@ impl App {
         Some(msg)
     }
 
+    pub fn handle_slash_command(&mut self, cmd: &str) -> bool {
+        match cmd {
+            "/new" => {
+                self.reset_session();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn reset_session(&mut self) {
+        self.messages = vec![Message {
+            role: MessageRole::System,
+            content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_result_error: false,
+        }];
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.scroll_offset = 0;
+        self.pending_tool_calls.clear();
+        self.streaming = false;
+        self.agent_active = false;
+    }
+
     pub fn append_agent_token(&mut self, token: &str) {
         self.streaming = true;
         if let Some(last) = self.messages.last_mut()
@@ -404,5 +430,51 @@ mod tests {
         assert_eq!(app.input_mode(), "INSERT");
         app.agent_active = true;
         assert_eq!(app.input_mode(), "AGENT");
+    }
+
+    #[test]
+    fn test_slash_command_new_resets_session() {
+        let mut app = App::new();
+        // Add some conversation
+        app.messages.push(Message {
+            role: MessageRole::User,
+            content: "hello".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_result_error: false,
+        });
+        app.messages.push(Message {
+            role: MessageRole::Agent,
+            content: "hi there".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_result_error: false,
+        });
+        app.input = "some text".into();
+        app.cursor_pos = 5;
+        app.scroll_offset = 10;
+        app.streaming = true;
+        app.agent_active = true;
+
+        let handled = app.handle_slash_command("/new");
+        assert!(handled);
+
+        // Should be back to initial state
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::System);
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor_pos, 0);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(!app.streaming);
+        assert!(!app.agent_active);
+    }
+
+    #[test]
+    fn test_slash_command_unknown_returns_false() {
+        let mut app = App::new();
+        let handled = app.handle_slash_command("/foo");
+        assert!(!handled);
+        // App state unchanged (welcome message still present)
+        assert_eq!(app.messages.len(), 1);
     }
 }

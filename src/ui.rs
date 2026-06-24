@@ -209,6 +209,11 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw(" delete word │ "),
         Span::styled(
+            "/new",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" clear │ "),
+        Span::styled(
             "↑↓",
             Style::default().add_modifier(Modifier::BOLD),
         ),
