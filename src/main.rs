@@ -270,10 +270,16 @@ async fn agent_loop(
             tool_result_error: false,
         });
 
-        // Execute each tool call
+        // Execute each tool call on a blocking thread to keep the runtime responsive
         for tc in &completed {
             debug!("Executing tool: {} with args: {}", tc.name, tc.arguments);
-            let (result, is_error) = tools::execute_tool(&tc.name, &tc.arguments);
+            let name = tc.name.clone();
+            let arguments = tc.arguments.clone();
+            let (result, is_error) = tokio::task::spawn_blocking(move || {
+                tools::execute_tool(&name, &arguments)
+            })
+            .await
+            .unwrap_or_else(|e| (format!("Tool execution panicked: {}", e), true));
             debug!(
                 "Tool {} result (error={}): {}",
                 tc.name,
