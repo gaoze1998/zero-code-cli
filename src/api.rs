@@ -223,12 +223,35 @@ pub async fn stream_chat(
     // Tool call accumulation by index
     let mut acc_tool_calls: Vec<AccToolCall> = Vec::new();
 
+    let collect_completed = |acc: &[AccToolCall]| -> Vec<CompletedToolCall> {
+        acc.iter()
+            .filter(|tc| !tc.id.is_empty() && !tc.name.is_empty())
+            .map(|tc| CompletedToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                arguments: tc.arguments.clone(),
+            })
+            .collect()
+    };
+
     loop {
         use futures_util::StreamExt;
-        let chunk = stream
-            .next()
-            .await
-            .ok_or_else(|| "Stream ended unexpectedly".to_string())?;
+        let chunk_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.next(),
+        )
+        .await;
+        let chunk = match chunk_result {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                crate::debug!("Stream ended without [DONE], {} tokens received", token_count);
+                return Ok(collect_completed(&acc_tool_calls));
+            }
+            Err(_elapsed) => {
+                crate::debug!("Stream read timed out after 30s, {} tokens received", token_count);
+                return Ok(collect_completed(&acc_tool_calls));
+            }
+        };
         let chunk = chunk.map_err(|e| format!("Stream read error: {}", e))?;
         let text = String::from_utf8_lossy(&chunk);
 
@@ -243,19 +266,7 @@ pub async fn stream_chat(
 
             if line == "data: [DONE]" {
                 crate::debug!("Stream complete, {} tokens received", token_count);
-
-                // Collect completed tool calls
-                let completed: Vec<CompletedToolCall> = acc_tool_calls
-                    .iter()
-                    .filter(|tc| !tc.id.is_empty() && !tc.name.is_empty())
-                    .map(|tc| CompletedToolCall {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    })
-                    .collect();
-
-                return Ok(completed);
+                return Ok(collect_completed(&acc_tool_calls));
             }
 
             if let Some(data) = line.strip_prefix("data: ") {

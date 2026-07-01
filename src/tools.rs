@@ -325,25 +325,37 @@ fn exec_bash(args: &Value) -> (String, bool) {
     let timeout_ms = timeout_ms.min(120_000); // max 120s
     let timeout = Duration::from_millis(timeout_ms);
 
-    let output = match Command::new("bash")
+    let child = match Command::new("bash")
         .args(["-c", command])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        Ok(child) => {
-            match child.wait_with_output() {
-                Ok(o) => o,
-                Err(e) => return (format!("Failed to wait on process: {}", e), true),
-            }
-        }
+        Ok(c) => c,
         Err(e) => return (format!("Failed to spawn command: {}", e), true),
     };
 
-    // Note: timeout via Duration isn't directly supported in std::process.
-    // For a production implementation, we'd use wait_timeout or similar.
-    // Using the raw approach for now — the command will run to completion.
-    let _ = timeout;
+    let pid = child.id();
+
+    // Wait for the child on a separate thread so we can enforce a timeout
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+
+    let output = match rx.recv_timeout(timeout) {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return (format!("Failed to wait on process: {}", e), true),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            let _ = rx.recv_timeout(Duration::from_secs(3));
+            return (format!("Command timed out after {}ms", timeout_ms), true);
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return ("Process wait thread panicked".into(), true);
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
