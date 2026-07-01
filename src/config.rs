@@ -17,6 +17,10 @@ pub struct Config {
     pub temperature: f32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    #[serde(default = "default_retry_count")]
+    pub retry_count: u32,
+    #[serde(default = "default_retry_delay_secs")]
+    pub retry_delay_secs: u32,
 }
 
 fn default_api_url() -> String {
@@ -41,6 +45,14 @@ fn default_temperature() -> f32 {
 
 fn default_system_prompt() -> String {
     "You are a helpful coding assistant. Answer concisely and accurately.".into()
+}
+
+fn default_retry_count() -> u32 {
+    2
+}
+
+fn default_retry_delay_secs() -> u32 {
+    2
 }
 
 impl Config {
@@ -91,6 +103,8 @@ impl Default for Config {
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             system_prompt: default_system_prompt(),
+            retry_count: default_retry_count(),
+            retry_delay_secs: default_retry_delay_secs(),
         }
     }
 }

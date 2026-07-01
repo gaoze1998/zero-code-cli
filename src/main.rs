@@ -202,17 +202,43 @@ async fn agent_loop(
             mode
         );
 
-        let completed = match api::stream_chat(
-            config,
-            &messages,
-            Some(tool_defs.clone()),
-            event_tx.clone(),
-        )
-        .await
-        {
-            Ok(tool_calls) => tool_calls,
-            Err(e) => {
-                let _ = event_tx.send(AgentEvent::Error(e));
+        let max_attempts = config.retry_count + 1;
+        let mut last_error = String::new();
+        let mut completed = None;
+
+        for attempt in 0..max_attempts {
+            match api::stream_chat(
+                config,
+                &messages,
+                Some(tool_defs.clone()),
+                event_tx.clone(),
+            )
+            .await
+            {
+                Ok(tool_calls) => {
+                    completed = Some(tool_calls);
+                    break;
+                }
+                Err(e) => {
+                    last_error = e;
+                    if attempt + 1 < max_attempts {
+                        let delay = config.retry_delay_secs * 2u32.pow(attempt);
+                        let _ = event_tx.send(AgentEvent::Token(format!(
+                            "\n[API call failed, retrying in {}s (attempt {}/{})...]\n",
+                            delay,
+                            attempt + 1,
+                            max_attempts
+                        )));
+                        tokio::time::sleep(std::time::Duration::from_secs(delay.into())).await;
+                    }
+                }
+            }
+        }
+
+        let completed = match completed {
+            Some(c) => c,
+            None => {
+                let _ = event_tx.send(AgentEvent::Error(last_error));
                 return;
             }
         };
