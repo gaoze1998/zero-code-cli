@@ -24,7 +24,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "read_file".into(),
-                description: "Read a file. Supports optional start_line and end_line (1-indexed, inclusive) for partial reads.".into(),
+                description: "Read a file. Prefer using start_line and end_line (1-indexed, inclusive) to read only the relevant portion of large files, rather than reading the entire file at once.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -49,7 +49,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "write_file".into(),
-                description: "Write or overwrite a file. Supports optional start_line and end_line for partial edits (replaces those lines with content). Creates parent directories if needed.".into(),
+                description: "Write or overwrite a file. Prefer using start_line and end_line for targeted edits (replaces those lines with content) rather than rewriting the entire file. Creates parent directories if needed.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
