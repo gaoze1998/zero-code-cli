@@ -2,17 +2,18 @@
 
 A concise, high-performance terminal coding agent written in safe Rust. It interacts with the DeepSeek API to help you explore, plan, and write code — all from your terminal.
 
-> ~2700 lines of Rust, zero `unsafe` code, single-threaded async runtime.
+> ~3100 lines of Rust, zero `unsafe` code, single-threaded async runtime.
 
 ## Features
 
 - **Dual-mode workflow** — Plan mode for research and design thinking, Build mode for writing code. Switch with `Tab`.
 - **Plan artifact handoff** — When you switch from Plan to Build, the plan conversation is captured and injected as context so the Build agent inherits the full design.
 - **ReAct agent loop** — The agent reasons, calls tools, and iterates up to 10 turns per message.
-- **Built-in tools** — `read_file`, `write_file`, `bash`, `grep`, `ls` — all defined with JSON Schema and accessible to the model.
+- **API retry with exponential backoff** — Failed API calls are retried up to `retry_count` times with configurable delay.
+- **Built-in tools** — `read_file`, `write_file` (both with partial read/write via line ranges), `bash` (with timeout enforcement), `grep`, `ls` — all defined with JSON Schema and accessible to the model.
 - **Streaming TUI** — Real-time token streaming with blinking cursor indicator, rendered with [Ratatui](https://ratatui.rs/).
 - **DeepSeek reasoning support** — Handles `reasoning_content` tokens from DeepSeek reasoning models.
-- **Configurable** — API endpoint, model, temperature, max tokens, and custom system prompt all set via `~/.zero-code-cli/config.toml`.
+- **Configurable** — API endpoint, model, temperature, max tokens, retry settings, and custom system prompt all set via `~/.zero-code-cli/config.toml`.
 - **Debug logging** — Set `DEBUG=true` for detailed logs to `~/.zero-code-cli/debug.log`.
 
 ## Requirements
@@ -40,6 +41,8 @@ api_key = "sk-your-key-here"
 model = "deepseek-v4-flash"
 max_tokens = 4096
 temperature = 0.7
+retry_count = 2
+retry_delay_secs = 2
 system_prompt = "You are a helpful coding assistant."
 ```
 
@@ -90,11 +93,17 @@ DEBUG=true cargo run
 
 The agent can call these tools on your filesystem:
 
-- `read_file` — Read file contents (1 MB limit)
-- `write_file` — Write or overwrite a file (path traversal guarded)
-- `bash` — Execute shell commands (accepts `timeout_ms` parameter)
+- `read_file` — Read file contents, supports partial reads via `start_line`/`end_line` (1 MB limit)
+- `write_file` — Write or overwrite a file, supports targeted edits via `start_line`/`end_line` (path traversal guarded)
+- `bash` — Execute shell commands with configurable timeout (default 30s, max 120s)
 - `grep` — Search files by regex (output truncated to 100 KB)
 - `ls` — List directory contents
+
+## Examples
+
+See the [`examples/`](examples/) directory for projects built with zero-code-cli:
+
+- **[tetris](examples/tetris/)** — Classic Tetris game (vanilla JS + HTML5 Canvas), generated entirely by the agent.
 
 ## Architecture
 
