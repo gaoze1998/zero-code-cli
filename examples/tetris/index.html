@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tetris</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="game-container">
+    <!-- Board -->
+    <div class="board-area">
+      <div class="game-title">TETRIS</div>
+      <canvas id="game-canvas"></canvas>
+    </div>
+
+    <!-- Side Panel -->
+    <div class="side-panel">
+      <!-- Next Piece -->
+      <div class="panel-section">
+        <h3>Next</h3>
+        <canvas id="preview-canvas"></canvas>
+      </div>
+
+      <!-- Stats -->
+      <div class="panel-section">
+        <h3>Stats</h3>
+        <div class="stat-row">
+          <span class="stat-label">Score</span>
+          <span class="stat-value" id="score-value">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Lines</span>
+          <span class="stat-value" id="lines-value">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Level</span>
+          <span class="stat-value" id="level-value">1</span>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="panel-section">
+        <h3>Controls</h3>
+        <div class="controls-info">
+          <kbd>←</kbd> <kbd>→</kbd> Move<br>
+          <kbd>↑</kbd> Rotate CW<br>
+          <kbd>Z</kbd> Rotate CCW<br>
+          <kbd>↓</kbd> Soft Drop<br>
+          <kbd>Space</kbd> Hard Drop<br>
+          <kbd>P</kbd> Pause<br>
+          <kbd>Enter</kbd> Start
+        </div>
+      </div>
+
+      <!-- Start Button -->
+      <button id="start-btn">Start Game</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
