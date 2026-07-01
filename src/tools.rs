@@ -24,13 +24,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "read_file".into(),
-                description: "Read the contents of a file at the given path. Returns the file content as text.".into(),
+                description: "Read a file. Supports optional start_line and end_line (1-indexed, inclusive) for partial reads.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Absolute or relative path to the file to read"
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed start line. Reads from this line to end of file (or to end_line if provided)."
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed end line (inclusive). Clamped to last line if it exceeds the file length."
                         }
                     },
                     "required": ["path"]
@@ -41,7 +49,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "write_file".into(),
-                description: "Write or overwrite a file with the given content. Creates parent directories if they don't exist.".into(),
+                description: "Write or overwrite a file. Supports optional start_line and end_line for partial edits (replaces those lines with content). Creates parent directories if needed.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -52,6 +60,14 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "content": {
                             "type": "string",
                             "description": "Content to write to the file"
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed start line for partial edit. Replaces lines [start_line, end_line] with content. If omitted, overwrites the entire file."
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed end line (inclusive). Defaults to start_line if omitted. Lines in range are replaced."
                         }
                     },
                     "required": ["path", "content"]
@@ -143,6 +159,21 @@ fn exec_read_file(args: &Value) -> (String, bool) {
         None => return ("Missing required parameter: path".into(), true),
     };
 
+    let start_line: Option<usize> = args["start_line"].as_u64().map(|v| v as usize);
+    let end_line: Option<usize> = args["end_line"].as_u64().map(|v| v as usize);
+
+    // Validate line parameters
+    if let Some(s) = start_line
+        && s < 1
+    {
+        return ("start_line must be >= 1 (1-indexed)".into(), true);
+    }
+    if let (Some(s), Some(e)) = (start_line, end_line)
+        && s > e
+    {
+        return ("start_line must be <= end_line".into(), true);
+    }
+
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return (format!("Failed to open {}: {}", path, e), true),
@@ -166,9 +197,25 @@ fn exec_read_file(args: &Value) -> (String, bool) {
     let mut reader = std::io::BufReader::new(file);
     let mut content = String::new();
     match reader.read_to_string(&mut content) {
-        Ok(_) => (content, false),
-        Err(e) => (format!("Failed to read {}: {}", path, e), true),
+        Ok(_) => {}
+        Err(e) => return (format!("Failed to read {}: {}", path, e), true),
     }
+
+    // If no line range specified, return full content (backward compatible)
+    if start_line.is_none() && end_line.is_none() {
+        return (content, false);
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let s = start_line.unwrap_or(1);
+    let e = end_line.unwrap_or(total).min(total);
+
+    if s > total {
+        return (String::new(), false);
+    }
+
+    (lines[s - 1..e].join("\n"), false)
 }
 
 fn exec_write_file(args: &Value) -> (String, bool) {
@@ -180,6 +227,21 @@ fn exec_write_file(args: &Value) -> (String, bool) {
         Some(c) => c,
         None => return ("Missing required parameter: content".into(), true),
     };
+
+    let start_line: Option<usize> = args["start_line"].as_u64().map(|v| v as usize);
+    let end_line: Option<usize> = args["end_line"].as_u64().map(|v| v as usize);
+
+    // Validate line parameters
+    if let Some(s) = start_line
+        && s < 1
+    {
+        return ("start_line must be >= 1 (1-indexed)".into(), true);
+    }
+    if let (Some(s), Some(e)) = (start_line, end_line)
+        && s > e
+    {
+        return ("start_line must be <= end_line".into(), true);
+    }
 
     // Safety: reject path traversal
     if path.contains("..") {
@@ -193,9 +255,63 @@ fn exec_write_file(args: &Value) -> (String, bool) {
         return (format!("Failed to create parent directories: {}", e), true);
     }
 
-    match std::fs::write(path, content) {
-        Ok(()) => (format!("Successfully wrote {} bytes to {}", content.len(), path), false),
-        Err(e) => (format!("Failed to write {}: {}", path, e), true),
+    // Fast path: no line params → overwrite entire file (backward compatible)
+    if start_line.is_none() && end_line.is_none() {
+        match std::fs::write(path, content) {
+            Ok(()) => (format!("Successfully wrote {} bytes to {}", content.len(), path), false),
+            Err(e) => (format!("Failed to write {}: {}", path, e), true),
+        }
+    } else {
+        // Line-range edit mode
+        let existing = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return (format!("Failed to read {}: {}", path, e), true),
+        };
+
+        let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+        let total = lines.len();
+        let s = start_line.unwrap_or(1);
+        let e = end_line.unwrap_or(s);
+
+        if s > total + 1 {
+            return (
+                format!(
+                    "start_line {} exceeds file length {} + 1; cannot insert with a gap",
+                    s, total
+                ),
+                true,
+            );
+        }
+
+        if total == 0 && s > 1 {
+            return (
+                format!(
+                    "Cannot edit non-existent file at line {}; file does not exist yet (0 lines)",
+                    s
+                ),
+                true,
+            );
+        }
+
+        let remove_start = s - 1;
+        let remove_count = if s > total { 0 } else { e.min(total) - s + 1 };
+
+        lines.drain(remove_start..remove_start + remove_count);
+
+        let new_lines: Vec<String> = if content.is_empty() {
+            vec![]
+        } else {
+            content.lines().map(|s| s.to_string()).collect()
+        };
+
+        lines.splice(remove_start..remove_start, new_lines);
+
+        let output = lines.join("\n");
+        match std::fs::write(path, &output) {
+            Ok(()) => (format!("Successfully edited {}: replaced lines {}-{} ({} bytes written)", path, s, e, output.len()), false),
+            Err(e) => (format!("Failed to write {}: {}", path, e), true),
+        }
     }
 }
 
@@ -333,6 +449,17 @@ fn exec_ls(args: &Value) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_file(content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("zero-code-test-{}-{}.txt", std::process::id(), id));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
 
     #[test]
     fn test_tool_definitions_count() {
@@ -413,5 +540,193 @@ mod tests {
         let (result, is_error) = execute_tool("ls", r#"{"path": "/nonexistent/dir"}"#);
         assert!(is_error);
         assert!(result.contains("Failed to list"));
+    }
+
+    // ── read_file line-range tests ──
+
+    #[test]
+    fn test_execute_read_file_with_line_range() {
+        let path = temp_file("line1\nline2\nline3\nline4\nline5");
+        let args = serde_json::json!({"path": path, "start_line": 2, "end_line": 4});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "line2\nline3\nline4");
+    }
+
+    #[test]
+    fn test_execute_read_file_start_line_only() {
+        let path = temp_file("line1\nline2\nline3\nline4\nline5");
+        let args = serde_json::json!({"path": path, "start_line": 3});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "line3\nline4\nline5");
+    }
+
+    #[test]
+    fn test_execute_read_file_end_line_only() {
+        let path = temp_file("line1\nline2\nline3\nline4\nline5");
+        let args = serde_json::json!({"path": path, "end_line": 2});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[test]
+    fn test_execute_read_file_start_gt_end_error() {
+        let args = r#"{"path": "/tmp/test.txt", "start_line": 5, "end_line": 3}"#;
+        let (result, is_error) = execute_tool("read_file", args);
+        assert!(is_error);
+        assert!(result.contains("start_line must be <= end_line"));
+    }
+
+    #[test]
+    fn test_execute_read_file_start_lt_1_error() {
+        let args = r#"{"path": "/tmp/test.txt", "start_line": 0}"#;
+        let (result, is_error) = execute_tool("read_file", args);
+        assert!(is_error);
+        assert!(result.contains("start_line must be >= 1"));
+    }
+
+    #[test]
+    fn test_execute_read_file_start_beyond_eof() {
+        let path = temp_file("a\nb\nc");
+        let args = serde_json::json!({"path": path, "start_line": 10});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_execute_read_file_end_clamped() {
+        let path = temp_file("a\nb\nc");
+        let args = serde_json::json!({"path": path, "start_line": 2, "end_line": 10});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "b\nc");
+    }
+
+    #[test]
+    fn test_execute_read_file_backward_compat_no_lines() {
+        let path = temp_file("hello\nworld");
+        let args = serde_json::json!({"path": path});
+        let (result, is_error) = execute_tool("read_file", &args.to_string());
+        assert!(!is_error);
+        assert_eq!(result, "hello\nworld");
+    }
+
+    // ── write_file line-range tests ──
+
+    #[test]
+    fn test_execute_write_file_line_range_edit() {
+        let path = temp_file("line1\nline2\nline3\nline4\nline5");
+        let args = serde_json::json!({"path": path, "start_line": 2, "end_line": 3, "content": "NEW_A\nNEW_B"});
+        let (result, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        assert!(result.contains("Successfully edited"));
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "line1\nNEW_A\nNEW_B\nline4\nline5");
+    }
+
+    #[test]
+    fn test_execute_write_file_single_line_replace() {
+        let path = temp_file("line1\nline2\nline3");
+        let args = serde_json::json!({"path": path, "start_line": 2, "content": "REPLACED"});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "line1\nREPLACED\nline3");
+    }
+
+    #[test]
+    fn test_execute_write_file_insert_at_end() {
+        let path = temp_file("line1\nline2");
+        let args = serde_json::json!({"path": path, "start_line": 3, "content": "line3\nline4"});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "line1\nline2\nline3\nline4");
+    }
+
+    #[test]
+    fn test_execute_write_file_delete_lines() {
+        let path = temp_file("line1\nline2\nline3\nline4");
+        let args = serde_json::json!({"path": path, "start_line": 2, "end_line": 3, "content": ""});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "line1\nline4");
+    }
+
+    #[test]
+    fn test_execute_write_file_invalid_range_gap() {
+        let path = temp_file("a\nb\nc");
+        let args = serde_json::json!({"path": path, "start_line": 10, "content": "x"});
+        let (result, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(is_error);
+        assert!(result.contains("exceeds file length"));
+    }
+
+    #[test]
+    fn test_execute_write_file_start_lt_1_error() {
+        let path = temp_file("a\nb");
+        let args = serde_json::json!({"path": path, "start_line": 0, "content": "x"});
+        let (result, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(is_error);
+        assert!(result.contains("start_line must be >= 1"));
+    }
+
+    #[test]
+    fn test_execute_write_file_start_gt_end_error() {
+        let path = temp_file("a\nb\nc");
+        let args = serde_json::json!({"path": path, "start_line": 5, "end_line": 3, "content": "x"});
+        let (result, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(is_error);
+        assert!(result.contains("start_line must be <= end_line"));
+    }
+
+    #[test]
+    fn test_execute_write_file_backward_compat_no_lines() {
+        let path = temp_file("old");
+        let args = serde_json::json!({"path": path, "content": "new content"});
+        let (result, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        assert!(result.contains("Successfully wrote"));
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "new content");
+    }
+
+    #[test]
+    fn test_execute_write_file_new_file_with_line_range() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zero-code-test-new-{}.txt", std::process::id()));
+        // Clean up in case a previous test left it
+        let _ = std::fs::remove_file(&path);
+        let args = serde_json::json!({"path": path, "start_line": 1, "content": "hello\nworld"});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "hello\nworld");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_execute_write_file_new_file_start_gt_1_error() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zero-code-test-new2-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let args = serde_json::json!({"path": path, "start_line": 5, "content": "x"});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(is_error);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_execute_write_file_multi_line_content() {
+        let path = temp_file("before\nTARGET\nafter");
+        let args = serde_json::json!({"path": path, "start_line": 2, "content": "A\nB\nC"});
+        let (_, is_error) = execute_tool("write_file", &args.to_string());
+        assert!(!is_error);
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, "before\nA\nB\nC\nafter");
     }
 }
