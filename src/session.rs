@@ -23,7 +23,7 @@ pub struct SessionInfo {
     pub updated_at: String,
 }
 
-fn memory_dir() -> PathBuf {
+pub(crate) fn memory_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".zero-code-cli")

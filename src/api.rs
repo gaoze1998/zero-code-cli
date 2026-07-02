@@ -6,26 +6,26 @@ use crate::app::AgentEvent;
 use crate::config::Config;
 use crate::tools::ToolDefinition;
 
-#[derive(Serialize)]
-struct ChatMessage {
-    role: String,
+#[derive(Serialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCallMsg>>,
+    pub tool_calls: Option<Vec<ToolCallMsg>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
+    pub tool_call_id: Option<String>,
 }
 
-#[derive(Serialize)]
-struct ToolCallMsg {
+#[derive(Serialize, Clone)]
+pub struct ToolCallMsg {
     id: String,
     #[serde(rename = "type")]
     call_type: String,
     function: FunctionCall,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct FunctionCall {
     name: String,
     arguments: String,
@@ -80,6 +80,74 @@ struct AccToolCall {
     name: String,
     arguments: String,
     started: bool,
+}
+
+/// Response structs for non-streaming chat completion.
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatResponseChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseChoice {
+    message: ChatResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    content: Option<String>,
+}
+
+/// Non-streaming chat completion for summarization tasks.
+pub async fn chat_sync(
+    config: &Config,
+    messages: &[ChatMessage],
+    max_tokens: u32,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let url = format!(
+        "{}/v1/chat/completions",
+        config.api_url.trim_end_matches('/')
+    );
+
+    let request = ChatRequest {
+        model: config.model.clone(),
+        messages: messages.to_vec(),
+        stream: false,
+        max_tokens,
+        temperature: config.temperature,
+        tools: None,
+        tool_choice: None,
+    };
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("API error ({}): {}", status, body));
+    }
+
+    let chat_response: ChatResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    chat_response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.clone())
+        .ok_or_else(|| "Empty response from API".to_string())
 }
 
 /// Build the list of messages to send to the API.

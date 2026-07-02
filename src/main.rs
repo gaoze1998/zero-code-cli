@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod config;
 mod logger;
+mod memory;
 mod session;
 mod tools;
 mod ui;
@@ -71,6 +72,22 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
             app.handle_agent_event(event);
         }
 
+        // Check for pending summarization (set by /summary or auto-detected)
+        if app.pending_summarization {
+            app.pending_summarization = false;
+            let is_manual = app.agent_active; // true if set by /summary handler
+            let config = app.config.clone();
+            let project = app.project_name.clone();
+            let tx = event_tx.clone();
+            rt.spawn(async move {
+                crate::memory::run_summarization(
+                    &config,
+                    &project,
+                    if is_manual { Some(tx) } else { None },
+                ).await;
+            });
+        }
+
         // Poll for input
         if event::poll(Duration::from_millis(16)).unwrap_or(false) {
             match event::read()? {
@@ -84,6 +101,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
 
         if app.should_quit {
             app.save_current_session();
+            if app.pending_summarization {
+                app.pending_summarization = false;
+                let config = app.config.clone();
+                let project = app.project_name.clone();
+                rt.block_on(async {
+                    crate::memory::run_summarization(&config, &project, None).await
+                });
+            }
             rt.shutdown_background();
             break;
         }

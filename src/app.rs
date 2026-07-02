@@ -21,6 +21,7 @@ pub struct App {
     pub config: Config,
     pub current_session_filename: Option<String>,
     pub project_name: String,
+    pub pending_summarization: bool,
     pending_tool_calls: Vec<PendingToolCall>,
 }
 
@@ -140,6 +141,7 @@ impl App {
             config: Config::load(),
             current_session_filename: None,
             project_name,
+            pending_summarization: false,
             pending_tool_calls: Vec::new(),
         }
     }
@@ -211,6 +213,17 @@ impl App {
             });
         }
 
+        // Search long-term memory for relevant context
+        if let Some(memory_ctx) = crate::memory::search_memory(&self.project_name, &msg) {
+            self.active_messages_mut().push(Message {
+                role: MessageRole::System,
+                content: memory_ctx,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_result_error: false,
+            });
+        }
+
         self.active_messages_mut().push(Message {
             role: MessageRole::User,
             content: msg.clone(),
@@ -229,6 +242,17 @@ impl App {
         match cmd {
             "/new" => {
                 self.reset_session();
+                true
+            }
+            "/summary" => {
+                if self.agent_active {
+                    self.add_system_message("Cannot run summary while agent is active.");
+                } else {
+                    self.agent_active = true;
+                    self.streaming = true;
+                    self.pending_summarization = true;
+                    self.add_system_message("Generating long-term memory summary...");
+                }
                 true
             }
             "/plan" => {
@@ -531,6 +555,12 @@ impl App {
 
         let _ = crate::session::save_session(&self.project_name, &filename, &data);
         self.current_session_filename = Some(filename);
+
+        // Check for expired sessions and flag for auto-summarization
+        let (expired, _) = crate::memory::check_expired_sessions(&self.project_name, 7);
+        if expired {
+            self.pending_summarization = true;
+        }
     }
 
     pub fn load_session(&mut self, filename: &str) -> bool {
