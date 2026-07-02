@@ -1,6 +1,7 @@
 use crate::config::Config;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Mode {
     Plan,
     Build,
@@ -18,10 +19,12 @@ pub struct App {
     pub streaming: bool,
     pub agent_active: bool,
     pub config: Config,
+    pub current_session_filename: Option<String>,
+    pub project_name: String,
     pending_tool_calls: Vec<PendingToolCall>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
     pub content: String,
@@ -30,24 +33,25 @@ pub struct Message {
     pub tool_result_error: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-struct PendingToolCall {
-    id: String,
-    arguments: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     User,
     Agent,
     System,
     Tool,
+}
+
+struct PendingToolCall {
+    id: String,
+    arguments: String,
 }
 
 pub enum AgentEvent {
@@ -96,7 +100,7 @@ Keep iterating through Thought -> Action -> Observation until the implementation
 complete and verified. Prefer small, incremental changes over large rewrites.";
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(project_name: String) -> Self {
         let welcome = Message {
             role: MessageRole::System,
             content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
@@ -134,6 +138,8 @@ impl App {
             streaming: false,
             agent_active: false,
             config: Config::load(),
+            current_session_filename: None,
+            project_name,
             pending_tool_calls: Vec::new(),
         }
     }
@@ -233,11 +239,53 @@ impl App {
                 self.switch_mode(Mode::Build);
                 true
             }
-            _ => false,
+            "/sessions" => {
+                let text = self.list_sessions_text();
+                self.add_system_message(&text);
+                true
+            }
+            other => {
+                if let Some(n_str) = other.strip_prefix("/sessions ") {
+                    let n_str = n_str.trim();
+                    if let Ok(n) = n_str.parse::<usize>() {
+                        self.save_current_session();
+                        let sessions =
+                            crate::session::list_sessions(&self.project_name).unwrap_or_default();
+                        if n >= 1 && n <= sessions.len() {
+                            let filename = &sessions[n - 1].filename;
+                            if self.load_session(filename) {
+                                self.add_system_message(&format!(
+                                    "Switched to session [{}]: {}",
+                                    n, sessions[n - 1].session_name
+                                ));
+                            } else {
+                                self.add_system_message(&format!(
+                                    "Failed to load session [{}]: {}",
+                                    n, sessions[n - 1].session_name
+                                ));
+                            }
+                        } else {
+                            self.add_system_message(&format!(
+                                "Invalid session number: {}. Use /sessions to list (1-{}).",
+                                n,
+                                sessions.len()
+                            ));
+                        }
+                    } else {
+                        self.add_system_message(
+                            "Usage: /sessions <number>. Use /sessions to list.",
+                        );
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
     fn reset_session(&mut self) {
+        self.save_current_session();
         let welcome = Message {
             role: MessageRole::System,
             content: "Welcome to Zero Code CLI. Type /help for available commands.".into(),
@@ -270,6 +318,7 @@ impl App {
         self.cursor_pos = 0;
         self.scroll_offset = 0;
         self.pending_tool_calls.clear();
+        self.current_session_filename = None;
         self.streaming = false;
         self.agent_active = false;
     }
@@ -437,6 +486,86 @@ impl App {
             }
         }
     }
+
+    pub fn save_current_session(&mut self) {
+        let has_user = self
+            .plan_messages
+            .iter()
+            .any(|m| matches!(m.role, MessageRole::User))
+            || self
+                .build_messages
+                .iter()
+                .any(|m| matches!(m.role, MessageRole::User));
+        if !has_user {
+            return;
+        }
+
+        let now = crate::session::now_readable();
+        let session_name =
+            crate::session::generate_session_name(&self.plan_messages, &self.build_messages);
+
+        let (filename, created_at) = match &self.current_session_filename {
+            Some(fname) => {
+                // Preserve original created_at when updating
+                let created_at = crate::session::load_session(&self.project_name, fname)
+                    .map(|d| d.created_at)
+                    .unwrap_or_else(|_| now.clone());
+                (fname.clone(), created_at)
+            }
+            None => {
+                let f = crate::session::make_session_filename(&session_name);
+                self.current_session_filename = Some(f.clone());
+                (f, now.clone())
+            }
+        };
+
+        let data = crate::session::SessionData {
+            session_name,
+            created_at,
+            updated_at: now,
+            plan_messages: self.plan_messages.clone(),
+            build_messages: self.build_messages.clone(),
+            plan_artifact: self.plan_artifact.clone(),
+            current_mode: self.current_mode,
+        };
+
+        let _ = crate::session::save_session(&self.project_name, &filename, &data);
+        self.current_session_filename = Some(filename);
+    }
+
+    pub fn load_session(&mut self, filename: &str) -> bool {
+        match crate::session::load_session(&self.project_name, filename) {
+            Ok(data) => {
+                self.plan_messages = data.plan_messages;
+                self.build_messages = data.build_messages;
+                self.plan_artifact = data.plan_artifact;
+                self.current_mode = data.current_mode;
+                self.current_session_filename = Some(filename.to_string());
+                self.input.clear();
+                self.cursor_pos = 0;
+                self.scroll_offset = 0;
+                self.pending_tool_calls.clear();
+                self.streaming = false;
+                self.agent_active = false;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub fn list_sessions_text(&self) -> String {
+        let sessions =
+            crate::session::list_sessions(&self.project_name).unwrap_or_default();
+        if sessions.is_empty() {
+            return "No saved sessions.".into();
+        }
+        let mut lines = vec!["Available sessions:".to_string()];
+        for (i, s) in sessions.iter().enumerate() {
+            lines.push(format!("  [{}] {} ({})", i + 1, s.session_name, s.updated_at));
+        }
+        lines.push("Use /sessions <number> to switch.".to_string());
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -445,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let app = App::new();
+        let app = App::new("test".into());
         assert_eq!(app.current_mode, Mode::Plan);
         // Each mode has welcome + mode system prompt = 2 messages
         assert_eq!(app.plan_messages.len(), 2);
@@ -461,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_active_messages_respects_mode() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         // Plan mode by default — push a user message
         app.input = "plan msg".into();
         app.send_message();
@@ -471,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_append_first_token_creates_agent_message() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         let initial_len = app.active_messages().len();
         app.append_agent_token("Hello");
         assert_eq!(app.active_messages().len(), initial_len + 1);
@@ -482,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_append_token_appends_to_existing_agent() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.append_agent_token("Hello");
         app.append_agent_token(" world");
         let last = app.active_messages().last().unwrap();
@@ -491,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_append_token_after_system_message_creates_new_agent() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.append_agent_token("Hi");
         app.add_system_message("Error: something");
         app.append_agent_token("Hello again");
@@ -506,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_token() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         let initial_len = app.active_messages().len();
         app.handle_agent_event(AgentEvent::Token("Hi".into()));
         app.handle_agent_event(AgentEvent::Token(" there".into()));
@@ -519,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_done() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
         app.streaming = true;
         app.handle_agent_event(AgentEvent::Done);
@@ -529,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_error() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
         app.streaming = true;
         app.handle_agent_event(AgentEvent::Error("boom".into()));
@@ -542,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_tool_call_flow() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         let initial_len = app.active_messages().len();
 
         app.handle_agent_event(AgentEvent::Token("Let me check".into()));
@@ -577,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_send_message_blocked_when_agent_active() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
         app.input = "test".into();
         assert!(app.send_message().is_none());
@@ -587,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_send_message_blocked_when_streaming() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.streaming = true;
         app.input = "test".into();
         assert!(app.send_message().is_none());
@@ -595,27 +724,27 @@ mod tests {
 
     #[test]
     fn test_input_mode_agent() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
         assert_eq!(app.input_mode(), "AGENT");
     }
 
     #[test]
     fn test_input_mode_plan() {
-        let app = App::new();
+        let app = App::new("test".into());
         assert_eq!(app.input_mode(), "PLAN");
     }
 
     #[test]
     fn test_input_mode_build() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.switch_mode(Mode::Build);
         assert_eq!(app.input_mode(), "BUILD");
     }
 
     #[test]
     fn test_slash_command_new_resets_both_modes() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         // Add messages to both modes
         app.plan_messages.push(Message {
             role: MessageRole::User, content: "p".into(),
@@ -649,14 +778,14 @@ mod tests {
 
     #[test]
     fn test_slash_command_unknown_returns_false() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         let handled = app.handle_slash_command("/foo");
         assert!(!handled);
     }
 
     #[test]
     fn test_switch_mode_plan_to_build_captures_artifact() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         // Add agent messages to plan mode
         app.plan_messages.push(Message {
             role: MessageRole::Agent,
@@ -681,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_switch_mode_build_to_plan_no_capture() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.switch_mode(Mode::Build);
         app.plan_artifact = None;
 
@@ -692,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_switch_mode_same_mode_noop() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.input = "hello".into();
         app.cursor_pos = 3;
         app.switch_mode(Mode::Plan); // same as default
@@ -702,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_slash_plan() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.switch_mode(Mode::Build);
         assert!(app.handle_slash_command("/plan"));
         assert_eq!(app.current_mode, Mode::Plan);
@@ -710,14 +839,14 @@ mod tests {
 
     #[test]
     fn test_slash_build() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         assert!(app.handle_slash_command("/build"));
         assert_eq!(app.current_mode, Mode::Build);
     }
 
     #[test]
     fn test_plan_artifact_injected_on_build_send() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         // Set up: switch to build mode with a plan artifact
         app.plan_messages.push(Message {
             role: MessageRole::Agent,
@@ -743,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_plan_artifact_not_injected_twice() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.plan_messages.push(Message {
             role: MessageRole::Agent,
             content: "Use hexagonal architecture".into(),

@@ -243,36 +243,36 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         )
     };
 
+    let session_label = match &app.current_session_filename {
+        Some(fname) => {
+            // Extract display name: strip .json and trailing _timestamp
+            let stem = fname.strip_suffix(".json").unwrap_or(fname);
+            // Find the last '_' that precedes the all-digit timestamp
+            let display = match stem.rfind('_') {
+                Some(pos) if stem[pos + 1..].chars().all(|c| c.is_ascii_digit()) => &stem[..pos],
+                _ => stem,
+            };
+            Span::raw(format!(" │ Session: {}", display))
+        }
+        None => Span::raw(" │ Session: new"),
+    };
+
     let status = Line::from(vec![
         mode_text,
         Span::raw(" │ "),
         Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" switch │ "),
-        Span::styled(
-            "Enter",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" send │ "),
-        Span::styled(
-            "Ctrl+C",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("Ctrl+C", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit │ "),
-        Span::styled(
-            "Ctrl+W",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("Ctrl+W", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" delete word │ "),
-        Span::styled(
-            "/new",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("/new", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" clear │ "),
-        Span::styled(
-            "↑↓",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("↑↓", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" scroll"),
+        session_label,
     ]);
 
     let paragraph = Paragraph::new(status)
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_streaming_cursor_renders() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.streaming = true;
         app.active_messages_mut().push(Message {
             role: MessageRole::Agent,
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_no_streaming_cursor_when_idle() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.streaming = false;
 
         let backend = TestBackend::new(80, 24);
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_agent_in_status_bar() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
 
         let backend = TestBackend::new(80, 24);
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_plan_in_status_bar() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = false;
         app.streaming = false;
 
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_build_in_status_bar() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.switch_mode(Mode::Build);
         app.agent_active = false;
         app.streaming = false;
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_input_agent_title() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
 
         let backend = TestBackend::new(80, 24);
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_input_normal_title_shows_mode() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = false;
 
         let backend = TestBackend::new(80, 24);
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_tab_bar_plan_active() {
-        let app = App::new();
+        let app = App::new("test".into());
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_renders() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.active_messages_mut().push(Message {
             role: MessageRole::Tool,
             content: "ls({\"path\":\"src\"})".into(),
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_renders() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.active_messages_mut().push(Message {
             role: MessageRole::Tool,
             content: "main.rs\napi.rs".into(),

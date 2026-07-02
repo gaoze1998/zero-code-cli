@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod config;
 mod logger;
+mod session;
 mod tools;
 mod ui;
 
@@ -47,7 +48,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         .enable_all()
         .build()
         .expect("failed to create tokio runtime");
-    let mut app = App::new();
+
+    let project_name = std::env::current_dir()
+        .ok()
+        .and_then(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut app = App::new(project_name);
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
 
@@ -74,6 +83,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         }
 
         if app.should_quit {
+            app.save_current_session();
             rt.shutdown_background();
             break;
         }
@@ -328,7 +338,7 @@ mod tests {
         // Send Done manually to verify the App handles it
         event_tx.send(AgentEvent::Done).unwrap();
 
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.agent_active = true;
         app.streaming = true;
 
@@ -342,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_full_streaming_pipeline() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
 
         app.input_char('H');
         app.input_char('i');
@@ -372,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_agent_loop_with_tool_calls() {
-        let mut app = App::new();
+        let mut app = App::new("test".into());
         app.input_char('x'); // Need non-empty input for send_message to succeed
         app.send_message();
 
