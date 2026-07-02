@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use app::{AgentEvent, App, Mode};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -98,6 +98,10 @@ fn handle_key(
     rt: &tokio::runtime::Runtime,
     event_tx: &mpsc::Sender<AgentEvent>,
 ) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+
     // Ctrl+C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.should_quit = true;
