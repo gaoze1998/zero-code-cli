@@ -6,6 +6,10 @@
 [![Lines](https://img.shields.io/badge/lines-~3400-blue.svg)](#)
 [![Unsafe](https://img.shields.io/badge/unsafe-0%20(#![forbid(unsafe_code)])-success.svg)](#)
 
+<p align="center">
+  <img src="screenshot/demo.png" alt="zero-code-cli terminal TUI showing the Plan/Build dual-mode streaming coding agent powered by DeepSeek" width="780">
+</p>
+
 > A concise, high-performance **terminal AI coding agent** written in safe Rust, powered by the **DeepSeek API**.
 
 `zero-code-cli` brings an agentic coding workflow to your terminal: it can explore your codebase, plan a design, and write code on your behalf — all through a streaming TUI. It uses a **Plan → Build** dual-mode workflow so you can separate thinking from implementation, and ships with filesystem + shell tools the agent can call autonomously via a ReAct loop.
