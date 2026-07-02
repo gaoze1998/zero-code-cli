@@ -2,12 +2,13 @@
 
 A concise, high-performance terminal coding agent written in safe Rust. It interacts with the DeepSeek API to help you explore, plan, and write code — all from your terminal.
 
-> ~3100 lines of Rust, zero `unsafe` code, single-threaded async runtime.
+> ~3700 lines of Rust, zero `unsafe` code, single-threaded async runtime.
 
 ## Features
 
 - **Dual-mode workflow** — Plan mode for research and design thinking, Build mode for writing code. Switch with `Tab`.
 - **Plan artifact handoff** — When you switch from Plan to Build, the plan conversation is captured and injected as context so the Build agent inherits the full design.
+- **Session persistence** — Conversations are automatically saved per-project under `~/.zero-code-cli/memory/`. List and switch sessions with `/sessions`.
 - **ReAct agent loop** — The agent reasons, calls tools, and iterates up to 10 turns per message.
 - **API retry with exponential backoff** — Failed API calls are retried up to `retry_count` times with configurable delay.
 - **Built-in tools** — `read_file`, `write_file` (both with partial read/write via line ranges), `bash` (with timeout enforcement), `grep`, `ls` — all defined with JSON Schema and accessible to the model.
@@ -78,9 +79,19 @@ DEBUG=true cargo run
 
 | Command | Action |
 |---|---|
-| `/new` | Reset both Plan and Build conversations |
+| `/new` | Reset both Plan and Build conversations (auto-saves current session) |
 | `/plan` | Switch to Plan mode |
 | `/build` | Switch to Build mode (captures plan artifact) |
+| `/sessions` | List all saved sessions for the current project |
+| `/sessions <n>` | Switch to session number `n` (auto-saves current session first) |
+
+### Sessions
+
+Sessions are automatically saved per-project to `~/.zero-code-cli/memory/<project>/sessions/`. Each session file stores both Plan and Build conversation histories, the plan artifact, and the current mode.
+
+- **Auto-save** — The current session is saved on quit (`Ctrl+C`/`Ctrl+D`), on `/new`, and before switching to another session.
+- **Auto-name** — Session names are derived from the first user message in the conversation.
+- **List & switch** — Use `/sessions` to see all saved sessions (most recent first), then `/sessions 1` to load session #1.
 
 ### Workflow
 
@@ -115,6 +126,7 @@ src/
 ├── ui.rs       Ratatui rendering: tabs, conversation, input, status bar
 ├── tools.rs    5 built-in tools with JSON Schema definitions
 ├── config.rs   Config loading from TOML + env var overrides
+├── session.rs  Session persistence: save, load, list (JSON files per project)
 └── logger.rs   Debug logging to file
 ```
 
