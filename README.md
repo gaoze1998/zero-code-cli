@@ -1,8 +1,30 @@
 # zero-code-cli
 
-A concise, high-performance terminal coding agent written in safe Rust. It interacts with the DeepSeek API to help you explore, plan, and write code — all from your terminal.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Language: Rust](https://img.shields.io/badge/Rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![Lines](https://img.shields.io/badge/lines-~3400-blue.svg)](#)
+[![Unsafe](https://img.shields.io/badge/unsafe-0%20(#![forbid(unsafe_code)])-success.svg)](#)
 
-> ~3700 lines of Rust, zero `unsafe` code, single-threaded async runtime.
+<p align="center">
+  <img src="screenshot/demo.png" alt="zero-code-cli terminal TUI showing the Plan/Build dual-mode streaming coding agent powered by DeepSeek" width="780">
+</p>
+
+> A concise, high-performance **terminal AI coding agent** written in safe Rust, powered by the **DeepSeek API**.
+
+`zero-code-cli` brings an agentic coding workflow to your terminal: it can explore your codebase, plan a design, and write code on your behalf — all through a streaming TUI. It uses a **Plan → Build** dual-mode workflow so you can separate thinking from implementation, and ships with filesystem + shell tools the agent can call autonomously via a ReAct loop.
+
+- ~3400 lines of Rust, **zero `unsafe` code** (`#![forbid(unsafe_code)]`)
+- Single-threaded async runtime (tokio current-thread)
+- Real-time token streaming rendered with [Ratatui](https://ratatui.rs/)
+- Works with any **DeepSeek-compatible** OpenAI-style chat API
+
+## Why zero-code-cli?
+
+- **Small and readable.** The entire agent fits in ~3400 lines across 8 files — easy to audit, learn from, and hack on. No framework lock-in.
+- **Plan / Build separation.** Research and design happen in Plan mode; switching to Build captures the plan as context so the coding agent inherits the full design.
+- **Safe Rust.** `#![forbid(unsafe_code)]` means no unsafe blocks, anywhere.
+- **Local-first sessions.** Conversations are saved per-project on your own machine under `~/.zero-code-cli/`.
 
 ## Features
 
@@ -13,9 +35,10 @@ A concise, high-performance terminal coding agent written in safe Rust. It inter
 - **API retry with exponential backoff** — Failed API calls are retried up to `retry_count` times with configurable delay.
 - **Built-in tools** — `read_file`, `write_file` (both with partial read/write via line ranges), `bash` (with timeout enforcement), `grep`, `ls` — all defined with JSON Schema and accessible to the model.
 - **Streaming TUI** — Real-time token streaming with blinking cursor indicator, rendered with [Ratatui](https://ratatui.rs/).
-- **DeepSeek reasoning support** — Handles `reasoning_content` tokens from DeepSeek reasoning models.
+- **DeepSeek reasoning support** — Handles `reasoning_content` tokens from DeepSeek reasoning models (e.g. `deepseek-reasoner`).
 - **Configurable** — API endpoint, model, temperature, max tokens, retry settings, and custom system prompt all set via `~/.zero-code-cli/config.toml`.
 - **Debug logging** — Set `DEBUG=true` for detailed logs to `~/.zero-code-cli/debug.log`.
+- **Cross-platform** — Runs on Windows, macOS, and Linux via [crossterm](https://github.com/crossterm-rs/crossterm).
 
 ## Requirements
 
@@ -25,12 +48,43 @@ A concise, high-performance terminal coding agent written in safe Rust. It inter
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/zero-code-cli.git
+git clone https://github.com/gaoze1998/zero-code-cli.git
 cd zero-code-cli
 cargo build --release
 ```
 
-The binary will be at `target/release/zero-code-cli`.
+The binary will be at `target/release/zero-code-cli` (or `target\release\zero-code-cli.exe` on Windows).
+
+### Quick start
+
+```bash
+# 1. Configure your API key
+mkdir -p ~/.zero-code-cli
+cat > ~/.zero-code-cli/config.toml <<'EOF'
+api_url = "https://api.deepseek.com"
+api_key = "sk-your-key-here"
+model = "deepseek-v4-flash"
+max_tokens = 4096
+temperature = 0.7
+EOF
+
+# 2. Run it from any project directory
+cd your-project
+zero-code-cli
+```
+
+On Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.zero-code-cli"
+@'
+api_url = "https://api.deepseek.com"
+api_key = "sk-your-key-here"
+model = "deepseek-v4-flash"
+max_tokens = 4096
+temperature = 0.7
+'@ | Set-Content "$env:USERPROFILE\.zero-code-cli\config.toml"
+```
 
 ## Configuration
 
@@ -54,6 +108,8 @@ Environment variable overrides:
 | `DEEPSEEK_API_KEY` | `api_key` |
 | `DEEPSEEK_API_URL` | `api_url` |
 | `DEEPSEEK_MODEL` | `model` |
+
+> **Tip:** Because the client speaks the OpenAI-compatible chat completions format, you can point `api_url` at any compatible endpoint (e.g. a local proxy or other DeepSeek-compatible provider).
 
 ## Usage
 
@@ -114,7 +170,7 @@ The agent can call these tools on your filesystem:
 
 See the [`examples/`](examples/) directory for projects built with zero-code-cli:
 
-- **[tetris](examples/tetris/)** — Classic Tetris game (vanilla JS + HTML5 Canvas), generated entirely by the agent.
+- **[tetris](examples/tetris/)** — Classic Tetris game (vanilla JS + HTML5 Canvas, SRS rotation, 7-bag randomizer, ghost piece), generated entirely by the agent.
 
 ## Architecture
 
@@ -132,6 +188,28 @@ src/
 
 **Data flow:** user types → `Enter` spawns `agent_loop()` as a tokio task → `api::stream_chat()` POSTs to the API → SSE tokens stream through an mpsc channel → main event loop drains them into `App` → `ui::draw()` re-renders at ~60fps. When the model responds with tool calls, `agent_loop()` executes them, feeds results back, and loops (max 10 iterations).
 
+```
+┌─────────────┐   Enter    ┌──────────────┐   SSE stream   ┌─────────────┐
+│   Input box │ ─────────► │  agent_loop  │ ◄────────────► │ DeepSeek API│
+└─────────────┘            └──────┬───────┘                └─────────────┘
+        ▲                          │ tool calls
+        │ render                   ▼
+┌───────┴───────┐            ┌──────────────┐
+│  ui::draw()   │ ◄───────── │   tools.rs   │  read/write/bash/grep/ls
+└───────────────┘   events   └──────────────┘
+```
+
+## Roadmap
+
+- [ ] `cargo install` distribution
+- [ ] More tools (glob, multi-file edit, web fetch)
+- [ ] Configurable max agent iterations
+- [ ] Markdown / syntax-highlighted rendering in the TUI
+
+## Contributing
+
+Contributions are welcome! This project is intentionally small — please keep new code `unsafe`-free and within the existing module layout. Open an issue first to discuss larger changes.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
