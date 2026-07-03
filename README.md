@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Rust](https://img.shields.io/badge/Rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#)
-[![Lines](https://img.shields.io/badge/lines-~3400-blue.svg)](#)
+[![Lines](https://img.shields.io/badge/lines-~4300-blue.svg)](#)
 [![Unsafe](https://img.shields.io/badge/unsafe-0%20(#![forbid(unsafe_code)])-success.svg)](#)
 
 <p align="center">
@@ -14,23 +14,24 @@
 
 `zero-code-cli` brings an agentic coding workflow to your terminal: it can explore your codebase, plan a design, and write code on your behalf — all through a streaming TUI. It uses a **Plan → Build** dual-mode workflow so you can separate thinking from implementation, and ships with filesystem + shell tools the agent can call autonomously via a ReAct loop.
 
-- ~3400 lines of Rust, **zero `unsafe` code** (`#![forbid(unsafe_code)]`)
+- ~4300 lines of Rust, **zero `unsafe` code** (`#![forbid(unsafe_code)]`)
 - Single-threaded async runtime (tokio current-thread)
 - Real-time token streaming rendered with [Ratatui](https://ratatui.rs/)
 - Works with any **DeepSeek-compatible** OpenAI-style chat API
 
 ## Why zero-code-cli?
 
-- **Small and readable.** The entire agent fits in ~3400 lines across 8 files — easy to audit, learn from, and hack on. No framework lock-in.
+- **Small and readable.** The entire agent fits in ~4300 lines across 9 files — easy to audit, learn from, and hack on. No framework lock-in.
 - **Plan / Build separation.** Research and design happen in Plan mode; switching to Build captures the plan as context so the coding agent inherits the full design.
 - **Safe Rust.** `#![forbid(unsafe_code)]` means no unsafe blocks, anywhere.
-- **Local-first sessions.** Conversations are saved per-project on your own machine under `~/.zero-code-cli/`.
+- **Local-first sessions & memory.** Conversations are saved per-project on your own machine under `~/.zero-code-cli/`, and past sessions are distilled into a topic-based long-term memory that is recalled on demand.
 
 ## Features
 
 - **Dual-mode workflow** — Plan mode for research and design thinking, Build mode for writing code. Switch with `Tab`.
 - **Plan artifact handoff** — When you switch from Plan to Build, the plan conversation is captured and injected as context so the Build agent inherits the full design.
 - **Session persistence** — Conversations are automatically saved per-project under `~/.zero-code-cli/memory/`. List and switch sessions with `/sessions`.
+- **Long-term memory** — `/summary` condenses all past sessions for a project into a topic-based `memory.md` via the API; relevant topic blocks are keyword-scored and injected as context on each new message. Sessions older than 7 days are auto-summarized.
 - **ReAct agent loop** — The agent reasons, calls tools, and iterates up to 10 turns per message.
 - **API retry with exponential backoff** — Failed API calls are retried up to `retry_count` times with configurable delay.
 - **Built-in tools** — `read_file`, `write_file` (both with partial read/write via line ranges), `bash` (with timeout enforcement), `grep`, `ls` — all defined with JSON Schema and accessible to the model.
@@ -136,6 +137,7 @@ DEBUG=true cargo run
 | Command | Action |
 |---|---|
 | `/new` | Reset both Plan and Build conversations (auto-saves current session) |
+| `/summary` | Summarize all sessions into long-term memory (`memory.md`), then delete session files |
 | `/plan` | Switch to Plan mode |
 | `/build` | Switch to Build mode (captures plan artifact) |
 | `/sessions` | List all saved sessions for the current project |
@@ -148,6 +150,15 @@ Sessions are automatically saved per-project to `~/.zero-code-cli/memory/<projec
 - **Auto-save** — The current session is saved on quit (`Ctrl+C`/`Ctrl+D`), on `/new`, and before switching to another session.
 - **Auto-name** — Session names are derived from the first user message in the conversation.
 - **List & switch** — Use `/sessions` to see all saved sessions (most recent first), then `/sessions 1` to load session #1.
+
+### Long-term memory
+
+Past sessions are distilled into a topic-based knowledge file at `~/.zero-code-cli/memory/<project>/memory.md`:
+
+- **Manual summary** — `/summary` sends all session transcripts to the API, which produces structured `## Topic:` blocks and writes them to `memory.md`, then deletes the raw session files.
+- **Auto-summarization** — When a session file is older than 7 days, summarization is triggered automatically (on save or quit).
+- **Recall** — On each user message, topic blocks are keyword-scored against your message; the top relevant blocks (above a 0.10 relevance threshold) are injected as system context so the agent remembers past decisions.
+- **Size guard** — `memory.md` is capped at 10 MB; when exceeded, the oldest topic blocks are pruned automatically.
 
 ### Workflow
 
@@ -183,10 +194,11 @@ src/
 ├── tools.rs    5 built-in tools with JSON Schema definitions
 ├── config.rs   Config loading from TOML + env var overrides
 ├── session.rs  Session persistence: save, load, list (JSON files per project)
+├── memory.rs   Long-term memory: topic-block search, summarization, expiry, size limits
 └── logger.rs   Debug logging to file
 ```
 
-**Data flow:** user types → `Enter` spawns `agent_loop()` as a tokio task → `api::stream_chat()` POSTs to the API → SSE tokens stream through an mpsc channel → main event loop drains them into `App` → `ui::draw()` re-renders at ~60fps. When the model responds with tool calls, `agent_loop()` executes them, feeds results back, and loops (max 10 iterations).
+**Data flow:** user types → `Enter` spawns `agent_loop()` as a tokio task → `api::stream_chat()` POSTs to the API → SSE tokens stream through an mpsc channel → main event loop drains them into `App` → `ui::draw()` re-renders at ~60fps. When the model responds with tool calls, `agent_loop()` executes them, feeds results back, and loops (max 10 iterations). On every user message, `memory::search_memory()` keyword-scores topic blocks from `memory.md` and injects the relevant ones as system context; `/summary` (or sessions older than 7 days) triggers `memory::run_summarization()`, consolidating all sessions into `memory.md` and deleting the originals.
 
 ```
 ┌─────────────┐   Enter    ┌──────────────┐   SSE stream   ┌─────────────┐
