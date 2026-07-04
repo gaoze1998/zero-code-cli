@@ -1,8 +1,17 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::Read;
-use std::process::Command;
-use std::time::Duration;
+
+// Platform-specific implementations of `exec_bash` and `exec_grep`.
+// Only one of the two modules is compiled in, exposed under the unified
+// name `shell` so call sites need no cfg themselves.
+#[cfg(unix)]
+#[path = "tools/shell_unix.rs"]
+mod shell;
+
+#[cfg(windows)]
+#[path = "tools/shell_windows.rs"]
+mod shell;
 
 #[derive(Clone, Serialize)]
 pub struct ToolDefinition {
@@ -19,6 +28,16 @@ pub struct FunctionDef {
 }
 
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
+    #[cfg(unix)]
+    let bash_desc = "Execute a shell command (bash) and return its stdout and stderr. Default timeout 30 seconds, max 120 seconds.";
+    #[cfg(windows)]
+    let bash_desc = "Execute a shell command (cmd.exe) and return its stdout and stderr. Default timeout 30 seconds, max 120 seconds.";
+
+    #[cfg(unix)]
+    let grep_desc = "Search for a regex pattern in files under a directory. Uses grep -rn under the hood. Returns matching lines with file paths and line numbers.";
+    #[cfg(windows)]
+    let grep_desc = "Search for a regex pattern in files under a directory. Uses ripgrep (rg) under the hood. Returns matching lines with file paths and line numbers.";
+
     vec![
         ToolDefinition {
             tool_type: "function".into(),
@@ -78,7 +97,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "bash".into(),
-                description: "Execute a shell command and return its stdout and stderr. Default timeout 30 seconds, max 120 seconds.".into(),
+                description: bash_desc.into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -99,7 +118,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".into(),
             function: FunctionDef {
                 name: "grep".into(),
-                description: "Search for a regex pattern in files under a directory. Uses grep -rn under the hood. Returns matching lines with file paths and line numbers.".into(),
+                description: grep_desc.into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -146,8 +165,8 @@ pub fn execute_tool(name: &str, arguments: &str) -> (String, bool) {
     match name {
         "read_file" => exec_read_file(&args),
         "write_file" => exec_write_file(&args),
-        "bash" => exec_bash(&args),
-        "grep" => exec_grep(&args),
+        "bash" => shell::exec_bash(&args),
+        "grep" => shell::exec_grep(&args),
         "ls" => exec_ls(&args),
         other => (format!("Unknown tool: {}", other), true),
     }
@@ -315,114 +334,6 @@ fn exec_write_file(args: &Value) -> (String, bool) {
     }
 }
 
-fn exec_bash(args: &Value) -> (String, bool) {
-    let command = match args["command"].as_str() {
-        Some(c) => c,
-        None => return ("Missing required parameter: command".into(), true),
-    };
-
-    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(30_000);
-    let timeout_ms = timeout_ms.min(120_000); // max 120s
-    let timeout = Duration::from_millis(timeout_ms);
-
-    let child = match Command::new("bash")
-        .args(["-c", command])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return (format!("Failed to spawn command: {}", e), true),
-    };
-
-    let pid = child.id();
-
-    // Wait for the child on a separate thread so we can enforce a timeout
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = child.wait_with_output();
-        let _ = tx.send(result);
-    });
-
-    let output = match rx.recv_timeout(timeout) {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return (format!("Failed to wait on process: {}", e), true),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
-            let _ = rx.recv_timeout(Duration::from_secs(3));
-            return (format!("Command timed out after {}ms", timeout_ms), true);
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            return ("Process wait thread panicked".into(), true);
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let mut result = String::new();
-    if !stdout.is_empty() {
-        result.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str("stderr:\n");
-        result.push_str(&stderr);
-    }
-    if result.is_empty() {
-        result.push_str("(no output)");
-    }
-
-    let is_error = !output.status.success();
-    (result, is_error)
-}
-
-fn exec_grep(args: &Value) -> (String, bool) {
-    let pattern = match args["pattern"].as_str() {
-        Some(p) => p,
-        None => return ("Missing required parameter: pattern".into(), true),
-    };
-    let path = match args["path"].as_str() {
-        Some(p) => p,
-        None => return ("Missing required parameter: path".into(), true),
-    };
-
-    let output = match Command::new("grep")
-        .args(["-rn", "--color=never", pattern, path])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return (format!("Failed to run grep: {}", e), true),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !stderr.is_empty() {
-        return (format!("grep error: {}", stderr), true);
-    }
-
-    let result = if stdout.is_empty() {
-        "No matches found.".into()
-    } else {
-        // Truncate to 100KB to avoid overwhelming context
-        if stdout.len() > 102_400 {
-            let truncated: String = stdout.chars().take(102_400).collect();
-            format!("{}\n... (truncated, {} bytes total)", truncated, stdout.len())
-        } else {
-            stdout.to_string()
-        }
-    };
-
-    let is_error = !output.status.success() && output.status.code() != Some(1);
-    // grep returns 0=matches found, 1=no matches, >1=error
-    (result, is_error)
-}
-
 fn exec_ls(args: &Value) -> (String, bool) {
     let path = args["path"].as_str().unwrap_or(".");
 
@@ -461,6 +372,7 @@ fn exec_ls(args: &Value) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -471,6 +383,18 @@ mod tests {
         let path = dir.join(format!("zero-code-test-{}-{}.txt", std::process::id(), id));
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    /// Checks whether the platform's grep backend is installed and callable.
+    /// On Unix this is `grep`; on Windows this is `rg` (ripgrep). Tests that
+    /// exercise the `grep` tool are skipped (pass) when the backend is absent
+    /// so the suite passes in any environment.
+    fn grep_backend_available() -> bool {
+        #[cfg(unix)]
+        let prog = "grep";
+        #[cfg(windows)]
+        let prog = "rg";
+        Command::new(prog).arg("--version").output().is_ok()
     }
 
     #[test]
@@ -537,6 +461,37 @@ mod tests {
         let (result, is_error) = execute_tool("bash", r#"{"command": "echo hello"}"#);
         assert!(!is_error);
         assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_execute_grep_finds_match() {
+        // Cross-platform: uses grep on Unix, ripgrep on Windows.
+        if !grep_backend_available() {
+            eprintln!("skipping: grep backend not installed on this system");
+            return;
+        }
+        // "main.rs" appears in the src directory listing/code, so searching
+        // for "main" in src should yield at least one match.
+        let (result, is_error) = execute_tool("grep", r#"{"pattern": "main", "path": "src"}"#);
+        assert!(!is_error);
+        assert!(!result.contains("No matches found."), "expected at least one match");
+        assert!(result.contains("main"));
+    }
+
+    #[test]
+    fn test_execute_grep_no_match() {
+        if !grep_backend_available() {
+            eprintln!("skipping: grep backend not installed on this system");
+            return;
+        }
+        // A pattern that is extremely unlikely to appear in source files.
+        let (result, is_error) = execute_tool(
+            "grep",
+            r#"{"pattern": "zzq_not_a_real_token_xyz", "path": "src"}"#,
+        );
+        // No matches is not an error (grep/rg exit 1, treated as success here).
+        assert!(!is_error);
+        assert!(result.contains("No matches found."));
     }
 
     #[test]
