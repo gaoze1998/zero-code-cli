@@ -45,6 +45,9 @@
 
 - Rust toolchain (edition 2024)
 - A [DeepSeek API key](https://platform.deepseek.com/)
+- **Windows only:** [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) must be installed and on your `PATH`. The `grep` tool uses `rg` on Windows (Unix uses the system `grep`).
+  - Install via `winget install BurntSushi.ripgrep.MSVC`, `scoop install ripgrep`, or `choco install ripgrep`
+  - Verify with `rg --version`
 
 ## Installation
 
@@ -210,13 +213,6 @@ src/
 │  ui::draw()   │ ◄───────── │   tools.rs   │  read/write/bash/grep/ls
 └───────────────┘   events   └──────────────┘
 ```
-
-## Roadmap
-
-- [ ] `cargo install` distribution
-- [ ] More tools (glob, multi-file edit, web fetch)
-- [ ] Configurable max agent iterations
-- [ ] Markdown / syntax-highlighted rendering in the TUI
 
 ## Contributing
 
