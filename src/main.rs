@@ -226,17 +226,15 @@ async fn agent_loop(
     _plan_artifact: Option<String>,
     event_tx: mpsc::Sender<AgentEvent>,
 ) {
-    const MAX_ITERATIONS: usize = 10;
-
     let mut messages: Vec<app::Message> = initial_messages.to_vec();
 
     let tool_defs = tools::get_tool_definitions();
 
-    for iteration in 0..MAX_ITERATIONS {
+    for iteration in 0..config.max_iterations {
         debug!(
             "Agent loop iteration {}/{}, {} messages in history, mode={:?}",
             iteration + 1,
-            MAX_ITERATIONS,
+            config.max_iterations,
             messages.len(),
             mode
         );
@@ -346,10 +344,10 @@ async fn agent_loop(
     }
 
     // Max iterations reached
-    debug!("Agent loop reached max iterations ({})", MAX_ITERATIONS);
+    debug!("Agent loop reached max iterations ({})", config.max_iterations);
     let _ = event_tx.send(AgentEvent::Error(format!(
         "Agent reached max iterations ({}) without completing the task.",
-        MAX_ITERATIONS
+        config.max_iterations
     )));
 }
 

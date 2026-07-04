@@ -21,6 +21,8 @@ pub struct Config {
     pub retry_count: u32,
     #[serde(default = "default_retry_delay_secs")]
     pub retry_delay_secs: u32,
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
 }
 
 fn default_api_url() -> String {
@@ -53,6 +55,10 @@ fn default_retry_count() -> u32 {
 
 fn default_retry_delay_secs() -> u32 {
     2
+}
+
+fn default_max_iterations() -> u32 {
+    50
 }
 
 impl Config {
@@ -105,6 +111,30 @@ impl Default for Config {
             system_prompt: default_system_prompt(),
             retry_count: default_retry_count(),
             retry_delay_secs: default_retry_delay_secs(),
+            max_iterations: default_max_iterations(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_max_iterations() {
+        let config = Config::default();
+        assert_eq!(config.max_iterations, 50);
+    }
+
+    #[test]
+    fn test_empty_toml_uses_default_max_iterations() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.max_iterations, 50);
+    }
+
+    #[test]
+    fn test_explicit_max_iterations_override() {
+        let config: Config = toml::from_str("max_iterations = 99").unwrap();
+        assert_eq!(config.max_iterations, 99);
     }
 }

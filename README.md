@@ -32,12 +32,12 @@
 - **Plan artifact handoff** — When you switch from Plan to Build, the plan conversation is captured and injected as context so the Build agent inherits the full design.
 - **Session persistence** — Conversations are automatically saved per-project under `~/.zero-code-cli/memory/`. List and switch sessions with `/sessions`.
 - **Long-term memory** — `/summary` condenses all past sessions for a project into a topic-based `memory.md` via the API; relevant topic blocks are keyword-scored and injected as context on each new message. Sessions older than 7 days are auto-summarized.
-- **ReAct agent loop** — The agent reasons, calls tools, and iterates up to 10 turns per message.
+- **ReAct agent loop** — The agent reasons, calls tools, and iterates up to `max_iterations` turns (default 50) per message.
 - **API retry with exponential backoff** — Failed API calls are retried up to `retry_count` times with configurable delay.
 - **Built-in tools** — `read_file`, `write_file` (both with partial read/write via line ranges), `bash` (with timeout enforcement), `grep`, `ls` — all defined with JSON Schema and accessible to the model.
 - **Streaming TUI** — Real-time token streaming with blinking cursor indicator, rendered with [Ratatui](https://ratatui.rs/).
 - **DeepSeek reasoning support** — Handles `reasoning_content` tokens from DeepSeek reasoning models (e.g. `deepseek-reasoner`).
-- **Configurable** — API endpoint, model, temperature, max tokens, retry settings, and custom system prompt all set via `~/.zero-code-cli/config.toml`.
+- **Configurable** — API endpoint, model, temperature, max tokens, retry settings, max iterations, and custom system prompt all set via `~/.zero-code-cli/config.toml`.
 - **Debug logging** — Set `DEBUG=true` for detailed logs to `~/.zero-code-cli/debug.log`.
 - **Cross-platform** — Runs on Windows, macOS, and Linux via [crossterm](https://github.com/crossterm-rs/crossterm).
 
@@ -70,6 +70,7 @@ api_key = "sk-your-key-here"
 model = "deepseek-v4-flash"
 max_tokens = 4096
 temperature = 0.7
+max_iterations = 50
 EOF
 
 # 2. Run it from any project directory
@@ -87,6 +88,7 @@ api_key = "sk-your-key-here"
 model = "deepseek-v4-flash"
 max_tokens = 4096
 temperature = 0.7
+max_iterations = 50
 '@ | Set-Content "$env:USERPROFILE\.zero-code-cli\config.toml"
 ```
 
@@ -102,6 +104,7 @@ max_tokens = 4096
 temperature = 0.7
 retry_count = 2
 retry_delay_secs = 2
+max_iterations = 50
 system_prompt = "You are a helpful coding assistant."
 ```
 
@@ -201,7 +204,7 @@ src/
 └── logger.rs   Debug logging to file
 ```
 
-**Data flow:** user types → `Enter` spawns `agent_loop()` as a tokio task → `api::stream_chat()` POSTs to the API → SSE tokens stream through an mpsc channel → main event loop drains them into `App` → `ui::draw()` re-renders at ~60fps. When the model responds with tool calls, `agent_loop()` executes them, feeds results back, and loops (max 10 iterations). On every user message, `memory::search_memory()` keyword-scores topic blocks from `memory.md` and injects the relevant ones as system context; `/summary` (or sessions older than 7 days) triggers `memory::run_summarization()`, consolidating all sessions into `memory.md` and deleting the originals.
+**Data flow:** user types → `Enter` spawns `agent_loop()` as a tokio task → `api::stream_chat()` POSTs to the API → SSE tokens stream through an mpsc channel → main event loop drains them into `App` → `ui::draw()` re-renders at ~60fps. When the model responds with tool calls, `agent_loop()` executes them, feeds results back, and loops (max `max_iterations` iterations, default 50). On every user message, `memory::search_memory()` keyword-scores topic blocks from `memory.md` and injects the relevant ones as system context; `/summary` (or sessions older than 7 days) triggers `memory::run_summarization()`, consolidating all sessions into `memory.md` and deleting the originals.
 
 ```
 ┌─────────────┐   Enter    ┌──────────────┐   SSE stream   ┌─────────────┐
